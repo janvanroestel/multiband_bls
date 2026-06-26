@@ -173,5 +173,5 @@ higher compute cost.
   periodic transits*, A&A **391**, 369 (2002).
 * J. VanderPlas & Ž. Ivezić, *Periodograms for Multiband Astronomical Time Series*,
   ApJ **812**, 18 (2015) — multiband shared-shape idea.
-* H. Boer et al., *cuvarbase* — GPU-accelerated variability tools for astronomy,
+* *cuvarbase* — GPU-accelerated variability tools for astronomy,
   https://github.com/johnh2o2/cuvarbase
