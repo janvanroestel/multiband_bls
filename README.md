@@ -53,6 +53,31 @@ GPU support requires CuPy; install separately for your CUDA version:
 pip install cupy-cuda12x    # or cupy-cuda11x
 ```
 
+## Input format
+
+Single-band functions (`sparse_bls`, `eebls`, …) take three 1-D arrays `t`, `y`, `dy`
+of equal length.
+
+Multiband functions accept a `bands` dict that maps a label string to a `(t, y, dy)`
+tuple:
+
+```python
+bands = {
+    "u": (t_u, y_u, dy_u),
+    "g": (t_g, y_g, dy_g),
+    "r": (t_r, y_r, dy_r),
+}
+```
+
+- **keys** — arbitrary band-label strings; passed through to `SBLSResult.bands` and
+  used to index `SBLSResult.best_depth`
+- **`t`** — observation times (days), 1-D float array
+- **`y`** — magnitudes or fluxes, 1-D float array, same length as `t`
+- **`dy`** — 1-sigma uncertainties, 1-D float array, same length as `t`
+
+Bands may have different numbers of observations; the arrays do not need to be the
+same length across bands.
+
 ## Quick start
 
 ### CPU (Cython)
