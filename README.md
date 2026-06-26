@@ -69,8 +69,8 @@ bands = {
 }
 ```
 
-- **keys** — arbitrary band-label strings; passed through to `SBLSResult.bands` and
-  used to index `SBLSResult.best_depth`
+- **keys** — arbitrary band-label strings; passed through to `BLSResult.bands` and
+  used to index `BLSResult.best_depth`
 - **`t`** — observation times (days), 1-D float array
 - **`y`** — magnitudes or fluxes, 1-D float array, same length as `t`
 - **`dy`** — 1-sigma uncertainties, 1-D float array, same length as `t`
@@ -105,7 +105,7 @@ from multiband_bls import multiband_eebls_gpu, gpu_available
 
 if gpu_available():
     res = multiband_eebls_gpu(bands, freqs, nbins=300)
-    # same SBLSResult; ~13× faster than Cython on a laptop RTX 3050 Ti
+    # same BLSResult; ~13× faster than Cython on a laptop RTX 3050 Ti
 ```
 
 > **Grid resolution matters.** The transit peak in frequency is narrow
@@ -141,12 +141,12 @@ if gpu_available():
 | `build_frequency_grid(t, p_min, p_max, q_min, ...)` | `multiband_bls` | build a properly spaced frequency grid |
 | `coadd_bands(bands)` | `multiband_bls` | merge a band dict into a single `(t, y, dy)` tuple |
 | `gpu_available()` | `multiband_bls` | returns `True` if a CUDA GPU is detected |
-| `SBLSResult` | `multiband_bls` | result dataclass (see below) |
+| `BLSResult` | `multiband_bls` | result dataclass (see below) |
 | `preprocess(y, dy)` | `multiband_bls.reference` | weight-normalise a light curve |
 
-### SBLSResult fields
+### BLSResult fields
 
-All entry points return an `SBLSResult` dataclass:
+All entry points return an `BLSResult` dataclass:
 
 | Field | Type | Description |
 |---|---|---|
@@ -166,13 +166,14 @@ All entry points return an `SBLSResult` dataclass:
 `eebls_gpu` and `multiband_eebls_gpu` use CuPy `RawKernel`s — one CUDA thread-block
 per trial frequency, with shared-memory phase bins. The periodogram runs entirely on
 the GPU; the best period's `t0`/duration/depth are recomputed once on the CPU. Returns
-the same `SBLSResult` as the Cython core.
+the same `BLSResult` as the Cython core.
 
 `eebls_gpu_fast` and `multiband_eebls_gpu_fast` trade float64 → float32 and add a
 prefix-sum + warp-shuffle reduction for additional throughput at the cost of
 ~single-precision accuracy. The `dlogq` parameter (default 0.3) controls the
 log-spacing of transit-width samples; smaller values give denser coverage at
-higher compute cost.
+higher compute cost. We thank `cuvarbase' by John Hoffman for these tricks to 
+speed up BLS on the GPU.
 
 > **Note:** `multiband_eebls_reference` has a fixed `nbins=300` default (no
 > auto-selection), unlike the Cython/GPU functions where `nbins=None` triggers

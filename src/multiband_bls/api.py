@@ -3,7 +3,7 @@
 - :func:`sparse_bls` / :func:`multiband_sparse_bls` — unbinned, O(N²/freq), precise
 - :func:`eebls` / :func:`multiband_eebls` — phase-binned, O(N/freq), fast for large N
 
-All functions return :class:`~multiband_bls.SBLSResult` with
+All functions return :class:`~multiband_bls.BLSResult` with
 ``power = Δχ²/χ²_flat ∈ [0, 1]`` (fraction of variance explained, maximised at
 the best period). Drop-in replacements for the reference implementations in
 :mod:`multiband_bls.reference`.
@@ -19,7 +19,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from . import _eebls, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
-from .periodogram import SBLSResult
+from .periodogram import BLSResult
 from .reference import auto_nbins, preprocess, variance_explained
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ def sparse_bls(
     frequencies: Array,
     q_max: float = 0.15,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Single-band Sparse BLS (compiled). See :func:`reference.sparse_bls_reference`.
 
     ``power``/``best_power`` are ``Delta chi^2 / chi^2_flat = SR^2 / YY`` (the
@@ -102,7 +102,7 @@ def sparse_bls(
     power, best_freq, t0, dur, depth, sr = _sbls.sbls_grid(
         t, wx, w_hat, freqs, float(q_max), int(min_points)
     )
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, yy),
         best_frequency=float(best_freq),
@@ -123,7 +123,7 @@ def eebls(
     qmin: float = 0.01,
     qmax: float = 0.10,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Classic binned BLS with edge-effect handling (Kovacs et al. 2002).
 
     The phase-folded light curve is binned onto ``nbins`` phase bins and the box
@@ -147,7 +147,7 @@ def eebls(
         t, wx, w_hat, freqs, int(nbins), float(qmin), float(qmax),
         int(min_points), tau_arr,
     )
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, yy),
         best_frequency=float(best_freq),
@@ -164,7 +164,7 @@ def multiband_sparse_bls(
     frequencies: Array,
     q_max: float = 0.15,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Multiband Sparse BLS (compiled). See :func:`reference.multiband_sparse_bls_reference`.
 
     Bands combine with matched-filter weighting (each weighted by its total
@@ -180,7 +180,7 @@ def multiband_sparse_bls(
         t_all, wx_all, w_all, band_all, len(labels), freqs,
         float(q_max), int(min_points), band_w,
     )
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, chi2_flat),
         best_frequency=float(best_freq),
@@ -200,7 +200,7 @@ def multiband_eebls(
     qmin: float = 0.01,
     qmax: float = 0.10,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Binned multiband BLS (compiled). See :func:`reference.multiband_eebls_reference`.
 
     Combines the speed of binning with the per-band-depth multiband model: each
@@ -221,7 +221,7 @@ def multiband_eebls(
         t_all, wx_all, w_all, band_all, len(labels), freqs, int(nbins),
         float(qmin), float(qmax), int(min_points), band_w,
     )
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, chi2_flat),
         best_frequency=float(best_freq),

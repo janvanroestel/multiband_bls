@@ -44,7 +44,7 @@ from typing import cast
 
 import numpy as np
 
-from .periodogram import SBLSResult
+from .periodogram import BLSResult
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +227,7 @@ def sparse_bls_reference(
     frequencies: Array,
     q_max: float = 0.15,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Single-band Sparse BLS (pure-Python reference).
 
     This is the pure-Python reference implementation. Use :func:`sparse_bls` for
@@ -265,7 +265,7 @@ def sparse_bls_reference(
             best.update(sr=sr, t0=t0, dur=dur, depth=depth, idx=idx)
 
     bidx = int(best["idx"])
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, yy),
         best_frequency=float(freqs[bidx]),
@@ -353,7 +353,7 @@ def multiband_sparse_bls_reference(
     frequencies: Array,
     q_max: float = 0.15,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Multiband Sparse BLS (pure-Python reference).
 
     This is the pure-Python reference implementation. Use :func:`multiband_sparse_bls`
@@ -427,7 +427,7 @@ def multiband_sparse_bls_reference(
             best.update(sr=sr, t0=t0, dur=dur, depths=depths, idx=idx)
 
     bidx = cast(int, best["idx"])
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, chi2_flat),
         best_frequency=float(freqs[bidx]),
@@ -522,7 +522,7 @@ def multiband_eebls_reference(
     qmin: float = 0.01,
     qmax: float = 0.10,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Binned multiband BLS (pure-Python reference).
 
     This is the pure-Python reference implementation. Use :func:`multiband_eebls`
@@ -575,7 +575,7 @@ def multiband_eebls_reference(
             best.update(sr=sr, t0=t0, dur=dur, depths=depths, idx=idx)
 
     bidx = cast(int, best["idx"])
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, chi2_flat),
         best_frequency=float(freqs[bidx]),
@@ -597,7 +597,7 @@ def eebls_reference(
     qmin: float = 0.01,
     qmax: float = 0.10,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """Single-band binned BLS (pure-Python reference).
 
     .. note::
@@ -675,7 +675,7 @@ def eebls_reference(
             best.update(sr=best_sr, t0=best_t0, dur=best_dur, depth=best_depth, idx=idx)
 
     bidx = int(best["idx"])
-    return SBLSResult(
+    return BLSResult(
         frequency=freqs,
         power=variance_explained(power, yy),
         best_frequency=float(freqs[bidx]),

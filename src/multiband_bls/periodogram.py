@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["SBLSResult"]
+__all__ = ["BLSResult"]
 
 from dataclasses import dataclass
 
@@ -10,7 +10,7 @@ import numpy as np
 
 
 @dataclass
-class SBLSResult:
+class BLSResult:
     """Outcome of a Sparse BLS search.
 
     Attributes

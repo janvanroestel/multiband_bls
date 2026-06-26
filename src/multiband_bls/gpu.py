@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 
 from .api import _merge_bands, _preprocess_single, eebls, multiband_eebls
-from .periodogram import SBLSResult
+from .periodogram import BLSResult
 from .reference import auto_nbins
 
 logger = logging.getLogger(__name__)
@@ -394,14 +394,14 @@ def _result(
     power_raw: np.ndarray,
     chi2_flat: float,
     frequencies: np.ndarray,
-    refine_fn: Callable[[float], SBLSResult],
+    refine_fn: Callable[[float], BLSResult],
     bands: tuple[str, ...] | None = None,
-) -> SBLSResult:
+) -> BLSResult:
     power = power_raw / chi2_flat
     best_idx = int(np.argmax(power))
     best_freq = float(frequencies[best_idx])
     ref = refine_fn(best_freq)
-    return SBLSResult(
+    return BLSResult(
         frequency=frequencies,
         power=power,
         best_frequency=best_freq,
@@ -423,7 +423,7 @@ def eebls_gpu(
     qmin: float = 0.01,
     qmax: float = 0.10,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """GPU binned BLS (single band). Mirrors :func:`multiband_bls.eebls`.
 
     If ``nbins`` is ``None`` (default) it is chosen automatically as
@@ -464,7 +464,7 @@ def multiband_eebls_gpu(
     qmin: float = 0.01,
     qmax: float = 0.10,
     min_points: int = 3,
-) -> SBLSResult:
+) -> BLSResult:
     """GPU binned multiband BLS. Mirrors :func:`multiband_bls.multiband_eebls`.
 
     If ``nbins`` is ``None`` (default) it is chosen automatically as
@@ -514,7 +514,7 @@ def eebls_gpu_fast(
     qmax: float = 0.10,
     min_points: int = 3,
     dlogq: float = 0.3,
-) -> SBLSResult:
+) -> BLSResult:
     """Fast GPU binned BLS using incremental accumulation and log-spaced transit widths.
 
     Instead of evaluating all integer widths from ``kmi`` to ``kma``, only
@@ -588,7 +588,7 @@ def multiband_eebls_gpu_fast(
     qmax: float = 0.10,
     min_points: int = 3,
     dlogq: float = 0.3,
-) -> SBLSResult:
+) -> BLSResult:
     """Fast GPU binned multiband BLS using incremental accumulation and log-spaced widths.
 
     Parameters

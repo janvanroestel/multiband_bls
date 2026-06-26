@@ -12,7 +12,7 @@ Quick start::
     result = multiband_eebls(bands, freqs)   # bands: {label: (t, y, dy)}
     print(result.best_period, result.best_power)
 
-All entry points return :class:`SBLSResult`.  ``power`` is
+All entry points return :class:`BLSResult`.  ``power`` is
 ``Δχ²/χ²_flat ∈ [0, 1]`` (fraction of variance explained).
 
 GPU acceleration (requires CuPy) is available via :func:`eebls_gpu`,
@@ -25,7 +25,7 @@ to pure-Python reference implementations automatically (with a warning).
 
 from __future__ import annotations
 
-from .periodogram import SBLSResult
+from .periodogram import BLSResult
 from .reference import (
     build_frequency_grid,
     coadd_bands,
@@ -75,7 +75,7 @@ except ImportError:  # pragma: no cover - needs the compiled cores
         return False
 
 __all__ = [
-    "SBLSResult",
+    "BLSResult",
     "sparse_bls",
     "multiband_sparse_bls",
     "eebls",
