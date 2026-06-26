@@ -384,9 +384,9 @@ def _log_widths(kmi: int, kma: int, dlogq: float = 0.3) -> np.ndarray:
     return np.array(sorted(widths), dtype=np.int32)
 
 
-def _grid_params(nbins: int, qmin: float, qmax: float) -> tuple[int, int]:
-    kmi = max(1, int(qmin * nbins))
-    kma = min(nbins, int(qmax * nbins) + 1)
+def _grid_params(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
+    kmi = max(1, int(q_min * nbins))
+    kma = min(nbins, int(q_max * nbins) + 1)
     return kmi, kma
 
 
@@ -420,8 +420,8 @@ def eebls_gpu(
     dy: Array,
     frequencies: Array,
     nbins: int | None = None,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
 ) -> BLSResult:
     """GPU binned BLS (single band). Mirrors :func:`multiband_bls.eebls`.
@@ -437,11 +437,11 @@ def eebls_gpu(
     frequencies :
         Trial frequencies (1/day).
     nbins :
-        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        Number of phase bins. Chosen automatically as ``clip(5 / q_min, 50, 500)``
         if ``None``.
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
-    qmax :
+    q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required.
@@ -449,7 +449,7 @@ def eebls_gpu(
     import cupy as cp
 
     if nbins is None:
-        nbins = auto_nbins(qmin)
+        nbins = auto_nbins(q_min)
     _kernels()
     wx, w_hat, yy = _preprocess_single(y, dy)
 
@@ -458,7 +458,7 @@ def eebls_gpu(
     w_d = cp.asarray(w_hat, dtype=cp.float64)
     f_d = cp.asarray(frequencies, dtype=cp.float64)
     nf = int(f_d.size)
-    kmi, kma = _grid_params(nbins, qmin, qmax)
+    kmi, kma = _grid_params(nbins, q_min, q_max)
     shared = 3 * nbins * 8  # ybin/rbin/cbin (float64)
 
     power_d = cp.empty(nf, dtype=cp.float64)
@@ -470,7 +470,7 @@ def eebls_gpu(
     freqs_np = np.asarray(frequencies, dtype=np.float64)
     return _result(power_np, yy, freqs_np,
                    lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
-                                    qmin=qmin, qmax=qmax,
+                                    q_min=q_min, q_max=q_max,
                                     min_points=min_points))
 
 
@@ -478,8 +478,8 @@ def multiband_eebls_gpu(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
     nbins: int | None = None,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
 ) -> BLSResult:
     """GPU binned multiband BLS. Mirrors :func:`multiband_bls.multiband_eebls`.
@@ -492,11 +492,11 @@ def multiband_eebls_gpu(
     frequencies :
         Trial frequencies (1/day).
     nbins :
-        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        Number of phase bins. Chosen automatically as ``clip(5 / q_min, 50, 500)``
         if ``None``.
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
-    qmax :
+    q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required across all bands.
@@ -504,7 +504,7 @@ def multiband_eebls_gpu(
     import cupy as cp
 
     if nbins is None:
-        nbins = auto_nbins(qmin)
+        nbins = auto_nbins(q_min)
     _kernels()
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     n_bands = len(labels)
@@ -519,7 +519,7 @@ def multiband_eebls_gpu(
     f_d = cp.asarray(frequencies, dtype=cp.float64)
     nf = int(f_d.size)
     power_d = cp.empty(nf, dtype=cp.float64)
-    kmi, kma = _grid_params(nbins, qmin, qmax)
+    kmi, kma = _grid_params(nbins, q_min, q_max)
 
     shared = 3 * n_bands * nbins * 8
     _multi_kernel((nf,), (_THREADS,),
@@ -530,7 +530,7 @@ def multiband_eebls_gpu(
     power = cp.asnumpy(power_d)
     return _result(power, chi2_flat, np.asarray(frequencies, dtype=float),
                    lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
-                                              qmin=qmin, qmax=qmax,
+                                              q_min=q_min, q_max=q_max,
                                               min_points=min_points),
                    bands=labels)
 
@@ -541,8 +541,8 @@ def eebls_gpu_fast(
     dy: Array,
     frequencies: Array,
     nbins: int | None = None,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
     dlogq: float = 0.3,
 ) -> BLSResult:
@@ -563,11 +563,11 @@ def eebls_gpu_fast(
     frequencies :
         Trial frequencies (1/day).
     nbins :
-        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        Number of phase bins. Chosen automatically as ``clip(5 / q_min, 50, 500)``
         if ``None``.
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
-    qmax :
+    q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required.
@@ -586,7 +586,7 @@ def eebls_gpu_fast(
     import cupy as cp
 
     if nbins is None:
-        nbins = auto_nbins(qmin)
+        nbins = auto_nbins(q_min)
 
     _kernels()  # ensure compiled
     wx, w_hat, yy = _preprocess_single(y, dy)
@@ -599,7 +599,7 @@ def eebls_gpu_fast(
     w_d = cp.asarray(w_hat, dtype=cp.float64)
     f_d = cp.asarray(frequencies, dtype=cp.float64)
     nf = int(f_d.size)
-    kmi, kma = _grid_params(nbins, qmin, qmax)
+    kmi, kma = _grid_params(nbins, q_min, q_max)
 
     widths_np = _log_widths(kmi, kma, dlogq)
     widths_d = cp.asarray(widths_np, dtype=cp.int32)
@@ -621,7 +621,7 @@ def eebls_gpu_fast(
     freqs_np = np.asarray(frequencies, dtype=np.float64)
     return _result(power_np, yy, freqs_np,
                    lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
-                                    qmin=qmin, qmax=qmax,
+                                    q_min=q_min, q_max=q_max,
                                     min_points=min_points))
 
 
@@ -629,8 +629,8 @@ def multiband_eebls_gpu_fast(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
     nbins: int | None = None,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
     dlogq: float = 0.3,
 ) -> BLSResult:
@@ -644,11 +644,11 @@ def multiband_eebls_gpu_fast(
     frequencies :
         Trial frequencies (1/day).
     nbins :
-        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        Number of phase bins. Chosen automatically as ``clip(5 / q_min, 50, 500)``
         if ``None``.
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
-    qmax :
+    q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required across all bands.
@@ -664,7 +664,7 @@ def multiband_eebls_gpu_fast(
     import cupy as cp
 
     if nbins is None:
-        nbins = auto_nbins(qmin)
+        nbins = auto_nbins(q_min)
 
     _kernels()  # ensure compiled
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
@@ -682,7 +682,7 @@ def multiband_eebls_gpu_fast(
     bw_d = cp.asarray(w_totals, dtype=cp.float64)
     f_d = cp.asarray(frequencies, dtype=cp.float64)
     nf = int(f_d.size)
-    kmi, kma = _grid_params(nbins, qmin, qmax)
+    kmi, kma = _grid_params(nbins, q_min, q_max)
 
     widths_np = _log_widths(kmi, kma, dlogq)
     widths_d = cp.asarray(widths_np, dtype=cp.int32)
@@ -703,6 +703,6 @@ def multiband_eebls_gpu_fast(
     power = cp.asnumpy(power_d)
     return _result(power, chi2_flat, np.asarray(frequencies, dtype=float),
                    lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
-                                              qmin=qmin, qmax=qmax,
+                                              q_min=q_min, q_max=q_max,
                                               min_points=min_points),
                    bands=labels)

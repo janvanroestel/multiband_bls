@@ -135,8 +135,8 @@ def eebls(
     dy: Array,
     frequencies: Array,
     nbins: int | None = None,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
 ) -> BLSResult:
     """Classic binned BLS with edge-effect handling (Kovacs et al. 2002).
@@ -157,24 +157,24 @@ def eebls(
     frequencies :
         Trial frequencies (1/day).
     nbins :
-        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        Number of phase bins. Chosen automatically as ``clip(5 / q_min, 50, 500)``
         if ``None``, ensuring at least 5 bins inside the narrowest transit.
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
-    qmax :
+    q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required.
     """
     if nbins is None:
-        nbins = auto_nbins(qmin)
+        nbins = auto_nbins(q_min)
     t = np.ascontiguousarray(t, dtype=np.float64)
     freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
     tau_arr = np.zeros(1, dtype=np.float64)  # box only
     wx, w_hat, yy = _preprocess_single(y, dy)
 
     power, best_freq, t0, dur, depth, sr, _ = _eebls.eebls_grid(
-        t, wx, w_hat, freqs, int(nbins), float(qmin), float(qmax),
+        t, wx, w_hat, freqs, int(nbins), float(q_min), float(q_max),
         int(min_points), tau_arr,
     )
     return BLSResult(
@@ -239,8 +239,8 @@ def multiband_eebls(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
     nbins: int | None = None,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
 ) -> BLSResult:
     """Binned multiband BLS (compiled). See :func:`reference.multiband_eebls_reference`.
@@ -258,24 +258,24 @@ def multiband_eebls(
     frequencies :
         Trial frequencies (1/day).
     nbins :
-        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        Number of phase bins. Chosen automatically as ``clip(5 / q_min, 50, 500)``
         if ``None``.
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
-    qmax :
+    q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required across all bands.
     """
     if nbins is None:
-        nbins = auto_nbins(qmin)
+        nbins = auto_nbins(q_min)
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
     band_w = np.ascontiguousarray(w_totals, dtype=np.float64)
 
     power, best_freq, t0, dur, depths, sr = _meebls.meebls_grid(
         t_all, wx_all, w_all, band_all, len(labels), freqs, int(nbins),
-        float(qmin), float(qmax), int(min_points), band_w,
+        float(q_min), float(q_max), int(min_points), band_w,
     )
     return BLSResult(
         frequency=freqs,

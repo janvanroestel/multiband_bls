@@ -119,7 +119,7 @@ if gpu_available():
 | Function | Backend | Purpose |
 |---|---|---|
 | `multiband_sparse_bls(bands, freqs, q_max, min_points)` | Cython | unbinned multiband BLS |
-| `multiband_eebls(bands, freqs, nbins, qmin, qmax, min_points)` | Cython | binned multiband BLS |
+| `multiband_eebls(bands, freqs, nbins, q_min, q_max, min_points)` | Cython | binned multiband BLS |
 | `multiband_eebls_gpu(bands, freqs, nbins, ...)` | CUDA | binned multiband BLS, GPU |
 | `multiband_eebls_gpu_fast(bands, freqs, nbins, ...)` | CUDA | float32 + warp-shuffle variant |
 | `multiband_sparse_bls_reference(...)`, `multiband_eebls_reference(...)` | Python | reference oracle |
@@ -129,7 +129,7 @@ if gpu_available():
 | Function | Backend | Purpose |
 |---|---|---|
 | `sparse_bls(t, y, dy, freqs, q_max, min_points)` | Cython | unbinned BLS |
-| `eebls(t, y, dy, freqs, nbins, qmin, qmax, min_points)` | Cython | binned BLS |
+| `eebls(t, y, dy, freqs, nbins, q_min, q_max, min_points)` | Cython | binned BLS |
 | `eebls_gpu(t, y, dy, freqs, nbins, ...)` | CUDA | binned BLS, GPU |
 | `eebls_gpu_fast(t, y, dy, freqs, nbins, ..., dlogq)` | CUDA | float32 + warp-shuffle variant |
 | `sparse_bls_reference(...)`, `eebls_reference(...)` | Python | reference oracle |
@@ -177,7 +177,7 @@ speed up BLS on the GPU.
 
 > **Note:** `multiband_eebls_reference` has a fixed `nbins=300` default (no
 > auto-selection), unlike the Cython/GPU functions where `nbins=None` triggers
-> automatic bin-count selection via `auto_nbins(qmin)`.
+> automatic bin-count selection via `auto_nbins(q_min)`.
 
 `gpu_available()` returns `True` if a usable CUDA GPU is detected.
 

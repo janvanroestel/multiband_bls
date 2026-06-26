@@ -75,20 +75,20 @@ def preprocess(y: Array, dy: Array) -> tuple[Array, Array, float]:
     return w_hat, x_tilde, mu
 
 
-def auto_nbins(qmin: float, n_res: int = 5) -> int:
+def auto_nbins(q_min: float, n_res: int = 5) -> int:
     """Return the recommended number of phase bins for a given minimum transit fraction.
 
-    Ensures at least ``n_res`` bins span the narrowest transit (``qmin``),
+    Ensures at least ``n_res`` bins span the narrowest transit (``q_min``),
     capped between 50 and 500 to keep compute tractable.
 
     Parameters
     ----------
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
     n_res :
         Minimum number of bins inside the narrowest transit.
     """
-    return int(np.clip(round(n_res / qmin), 50, 500))
+    return int(np.clip(round(n_res / q_min), 50, 500))
 
 
 def variance_explained(sr2: Array, denom: float) -> Array:
@@ -135,7 +135,7 @@ def build_frequency_grid(
         Number of frequency steps per transit peak width when ``df`` is auto-computed.
     q_min :
         Shortest fractional transit duration to resolve; sets the default ``df``.
-        Should match the ``qmin`` passed to the search function.
+        Should match the ``q_min`` passed to the search function.
 
     Raises
     ------
@@ -546,8 +546,8 @@ def multiband_eebls_reference(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
     nbins: int = 300,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
 ) -> BLSResult:
     """Binned multiband BLS (pure-Python reference).
@@ -569,17 +569,17 @@ def multiband_eebls_reference(
     nbins :
         Number of phase bins. Unlike the Cython/GPU equivalents, this defaults
         to 300 and does not support ``None`` (no auto-selection).
-    qmin :
+    q_min :
         Minimum transit duration as a fraction of the period.
-    qmax :
+    q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required across all bands.
     """
     labels = tuple(bands.keys())
     n_bands = len(labels)
-    kmi = max(1, int(qmin * nbins))
-    kma = min(nbins, int(qmax * nbins) + 1)
+    kmi = max(1, int(q_min * nbins))
+    kma = min(nbins, int(q_max * nbins) + 1)
 
     t_parts: list[Array] = []
     wx_parts: list[Array] = []
@@ -638,8 +638,8 @@ def eebls_reference(
     dy: Array,
     frequencies: Array,
     nbins: int | None = None,
-    qmin: float = 0.01,
-    qmax: float = 0.10,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
     min_points: int = 3,
 ) -> BLSResult:
     """Single-band binned BLS (pure-Python reference).
@@ -656,15 +656,15 @@ def eebls_reference(
         Trial frequencies (1/day).
     nbins:
         Number of phase bins. Chosen automatically via :func:`auto_nbins` if ``None``.
-    qmin, qmax:
+    q_min, q_max:
         Minimum and maximum transit duration as a fraction of the period.
     min_points:
         Minimum number of in-transit points required.
     """
     if nbins is None:
-        nbins = auto_nbins(qmin)
-    kmi = max(1, int(qmin * nbins))
-    kma = min(nbins, int(qmax * nbins) + 1)
+        nbins = auto_nbins(q_min)
+    kmi = max(1, int(q_min * nbins))
+    kma = min(nbins, int(q_max * nbins) + 1)
 
     t = np.asarray(t, dtype=float)
     w_hat, x_tilde, _ = preprocess(y, dy)

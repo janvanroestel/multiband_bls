@@ -111,7 +111,7 @@ def test_eebls_recovers_injected_period(lightcurve):
     t, y, dy = bands["r"]
     f_true = 1.0 / truth.period
     freqs = np.arange(f_true - 0.02, f_true + 0.02, 1e-4)  # grid spans f_true
-    res = eebls(t, y, dy, freqs, nbins=300, qmax=0.15)
+    res = eebls(t, y, dy, freqs, nbins=300, q_max=0.15)
     assert abs(res.best_frequency - f_true) < 2e-3
     assert res.best_depth > 0  # dimming (positive depth in magnitudes)
 
@@ -124,7 +124,7 @@ def test_eebls_agrees_with_sparse_bls():
     t, y, dy = bands["r"]  # well-sampled, high-SNR single band
     f_true = 1.0 / truth.period
     freqs = np.arange(f_true - 0.02, f_true + 0.02, 5e-5)
-    e = eebls(t, y, dy, freqs, nbins=400, qmax=0.12)
+    e = eebls(t, y, dy, freqs, nbins=400, q_max=0.12)
     s = sparse_bls(t, y, dy, freqs, q_max=0.12)
     assert abs(e.best_frequency - f_true) < 2e-3
     assert abs(e.best_frequency - s.best_frequency) < 2e-3
@@ -133,8 +133,8 @@ def test_eebls_agrees_with_sparse_bls():
 def test_multiband_eebls_matches_reference(lightcurve, freqs):
     """Compiled multiband eeBLS reproduces its pure-Python oracle bit-for-bit."""
     bands, _ = lightcurve
-    mc = multiband_eebls(bands, freqs, nbins=200, qmax=0.12)
-    mr = multiband_eebls_reference(bands, freqs, nbins=200, qmax=0.12)
+    mc = multiband_eebls(bands, freqs, nbins=200, q_max=0.12)
+    mr = multiband_eebls_reference(bands, freqs, nbins=200, q_max=0.12)
     np.testing.assert_allclose(mc.power, mr.power, rtol=0, atol=1e-9)
     np.testing.assert_allclose(
         np.asarray(mc.best_depth), np.asarray(mr.best_depth), atol=1e-9
@@ -144,7 +144,7 @@ def test_multiband_eebls_matches_reference(lightcurve, freqs):
 def test_multiband_eebls_recovers_period(lightcurve, freqs):
     """Binned multiband eeBLS recovers the period and the chromatic depths."""
     bands, truth = lightcurve
-    mc = multiband_eebls(bands, freqs, nbins=200, qmax=0.12)
+    mc = multiband_eebls(bands, freqs, nbins=200, q_max=0.12)
     assert abs(mc.best_frequency - 1.0 / truth.period) < 2e-4
     depths = {b: d for b, d in zip(mc.bands, mc.best_depth)}
     assert depths["u"] > depths["y"]  # bluest eclipse deepest
@@ -153,7 +153,7 @@ def test_multiband_eebls_recovers_period(lightcurve, freqs):
 def test_multiband_eebls_agrees_with_sparse(lightcurve, freqs):
     """Binned and unbinned multiband searches land on the same period."""
     bands, _ = lightcurve
-    ee = multiband_eebls(bands, freqs, nbins=400, qmax=0.12)
+    ee = multiband_eebls(bands, freqs, nbins=400, q_max=0.12)
     sp = multiband_sparse_bls(bands, freqs, q_max=0.12)
     assert abs(ee.best_frequency - sp.best_frequency) < 1e-3
 
@@ -162,8 +162,8 @@ def test_multiband_eebls_reduces_to_single_band(lightcurve, freqs):
     """With one band (matched gates), multiband eeBLS == single-band eeBLS."""
     bands, _ = lightcurve
     one = {"r": bands["r"]}
-    m = multiband_eebls(one, freqs, nbins=300, qmax=0.12, min_points=1)
-    e = eebls(*bands["r"], freqs, nbins=300, qmax=0.12, min_points=1)
+    m = multiband_eebls(one, freqs, nbins=300, q_max=0.12, min_points=1)
+    e = eebls(*bands["r"], freqs, nbins=300, q_max=0.12, min_points=1)
     np.testing.assert_allclose(m.power, e.power, rtol=0, atol=1e-9)
 
 
@@ -177,9 +177,9 @@ def test_power_is_variance_explained(lightcurve, freqs):
     t, y, dy = coadd_bands(bands)
     results = {
         "sparse": sparse_bls(t, y, dy, freqs, q_max=0.12),
-        "eebls": eebls(t, y, dy, freqs, nbins=300, qmax=0.12),
+        "eebls": eebls(t, y, dy, freqs, nbins=300, q_max=0.12),
         "multi": multiband_sparse_bls(bands, freqs, q_max=0.12),
-        "multi_ee": multiband_eebls(bands, freqs, nbins=200, qmax=0.12),
+        "multi_ee": multiband_eebls(bands, freqs, nbins=200, q_max=0.12),
     }
     for name, res in results.items():
         assert 0.0 <= res.power.min(), name
@@ -192,11 +192,11 @@ def test_gpu_matches_cpu(lightcurve, freqs):
     """GPU RawKernel binned BLS matches the CPU cores (single + multiband)."""
     bands, _ = lightcurve
     t, y, dy = coadd_bands(bands)
-    sc = eebls(t, y, dy, freqs, nbins=200, qmax=0.12, min_points=3)
-    sg = eebls_gpu(t, y, dy, freqs, nbins=200, qmax=0.12, min_points=3)
+    sc = eebls(t, y, dy, freqs, nbins=200, q_max=0.12, min_points=3)
+    sg = eebls_gpu(t, y, dy, freqs, nbins=200, q_max=0.12, min_points=3)
     np.testing.assert_allclose(sg.power, sc.power, rtol=1e-6, atol=1e-9)
-    mc = multiband_eebls(bands, freqs, nbins=200, qmax=0.12)
-    mg = multiband_eebls_gpu(bands, freqs, nbins=200, qmax=0.12)
+    mc = multiband_eebls(bands, freqs, nbins=200, q_max=0.12)
+    mg = multiband_eebls_gpu(bands, freqs, nbins=200, q_max=0.12)
     np.testing.assert_allclose(mg.power, mc.power, rtol=1e-6, atol=1e-9)
     assert mg.best_frequency == pytest.approx(mc.best_frequency)
 
@@ -226,8 +226,8 @@ def test_eebls_reference_matches_cython(lightcurve, freqs):
     """Pure-Python eebls_reference agrees with compiled eebls to floating-point precision."""
     bands, _ = lightcurve
     t, y, dy = bands["r"]
-    ref = eebls_reference(t, y, dy, freqs, nbins=200, qmax=0.12)
-    cyt = eebls(t, y, dy, freqs, nbins=200, qmax=0.12)
+    ref = eebls_reference(t, y, dy, freqs, nbins=200, q_max=0.12)
+    cyt = eebls(t, y, dy, freqs, nbins=200, q_max=0.12)
     np.testing.assert_allclose(ref.power, cyt.power, rtol=0, atol=1e-9)
     assert ref.best_period == pytest.approx(cyt.best_period)
 
