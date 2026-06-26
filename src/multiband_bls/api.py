@@ -94,6 +94,21 @@ def sparse_bls(
 
     ``power``/``best_power`` are ``Delta chi^2 / chi^2_flat = SR^2 / YY`` (the
     fraction of variance explained, in ``[0, 1]``, maximised at the period).
+
+    Parameters
+    ----------
+    t :
+        Observation times (days), 1-D float array.
+    y :
+        Magnitudes or fluxes, 1-D float array, same length as ``t``.
+    dy :
+        1-sigma uncertainties, 1-D float array, same length as ``t``.
+    frequencies :
+        Trial frequencies (1/day).
+    q_max :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required.
     """
     t = np.ascontiguousarray(t, dtype=np.float64)
     freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
@@ -127,14 +142,29 @@ def eebls(
     """Classic binned BLS with edge-effect handling (Kovacs et al. 2002).
 
     The phase-folded light curve is binned onto ``nbins`` phase bins and the box
-    is searched over bins, giving ``O(N)`` per-period cost (linear in the number
-    of points for a fixed bin count) versus the unbinned :func:`sparse_bls`'s
-    ``O(N^2)``. ``qmin``/``qmax`` bound the fractional transit duration.
+    is searched over bins, giving ``O(N)`` per-period cost versus the unbinned
+    :func:`sparse_bls`'s ``O(N^2)``.
     ``power``/``best_power`` are ``Delta chi^2 / chi^2_flat = SR^2 / YY``.
 
-    If ``nbins`` is ``None`` (default) it is chosen automatically as
-    ``clip(5 / qmin, 50, 500)`` so that at least 5 bins fall inside the
-    narrowest transit searched.
+    Parameters
+    ----------
+    t :
+        Observation times (days), 1-D float array.
+    y :
+        Magnitudes or fluxes, 1-D float array, same length as ``t``.
+    dy :
+        1-sigma uncertainties, 1-D float array, same length as ``t``.
+    frequencies :
+        Trial frequencies (1/day).
+    nbins :
+        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        if ``None``, ensuring at least 5 bins inside the narrowest transit.
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    qmax :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required.
     """
     if nbins is None:
         nbins = auto_nbins(qmin)
@@ -171,6 +201,18 @@ def multiband_sparse_bls(
     inverse variance ``W_b``). ``power``/``best_power`` are
     ``Delta chi^2 / chi^2_flat`` -- the fraction of variance explained, in
     ``[0, 1]``, maximised at the best period.
+
+    Parameters
+    ----------
+    bands :
+        Mapping ``label -> (t, y, dy)``. Each band keeps its own baseline and
+        depth; all bands share the trial period, epoch, and duration.
+    frequencies :
+        Trial frequencies (1/day).
+    q_max :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required across all bands.
     """
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
@@ -206,10 +248,24 @@ def multiband_eebls(
     Combines the speed of binning with the per-band-depth multiband model: each
     band is binned onto ``nbins`` shared phase bins; ``O(N)`` per period rather
     than the ``O(N^2)`` of :func:`multiband_sparse_bls`. Matched-filter weighting;
-    ``power``/``best_power`` are ``Delta chi^2 / chi^2_flat`` (as above).
+    ``power``/``best_power`` are ``Delta chi^2 / chi^2_flat``.
 
-    If ``nbins`` is ``None`` (default) it is chosen automatically as
-    ``clip(5 / qmin, 50, 500)``.
+    Parameters
+    ----------
+    bands :
+        Mapping ``label -> (t, y, dy)``. Each band keeps its own baseline and
+        depth; all bands share the trial period, epoch, and duration.
+    frequencies :
+        Trial frequencies (1/day).
+    nbins :
+        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        if ``None``.
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    qmax :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required across all bands.
     """
     if nbins is None:
         nbins = auto_nbins(qmin)

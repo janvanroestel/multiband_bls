@@ -426,8 +426,25 @@ def eebls_gpu(
 ) -> BLSResult:
     """GPU binned BLS (single band). Mirrors :func:`multiband_bls.eebls`.
 
-    If ``nbins`` is ``None`` (default) it is chosen automatically as
-    ``clip(5 / qmin, 50, 500)``.
+    Parameters
+    ----------
+    t :
+        Observation times (days), 1-D float array.
+    y :
+        Magnitudes or fluxes, 1-D float array, same length as ``t``.
+    dy :
+        1-sigma uncertainties, 1-D float array, same length as ``t``.
+    frequencies :
+        Trial frequencies (1/day).
+    nbins :
+        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        if ``None``.
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    qmax :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required.
     """
     import cupy as cp
 
@@ -467,8 +484,22 @@ def multiband_eebls_gpu(
 ) -> BLSResult:
     """GPU binned multiband BLS. Mirrors :func:`multiband_bls.multiband_eebls`.
 
-    If ``nbins`` is ``None`` (default) it is chosen automatically as
-    ``clip(5 / qmin, 50, 500)``.
+    Parameters
+    ----------
+    bands :
+        Mapping ``label -> (t, y, dy)``. Each band keeps its own baseline and
+        depth; all bands share the trial period, epoch, and duration.
+    frequencies :
+        Trial frequencies (1/day).
+    nbins :
+        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        if ``None``.
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    qmax :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required across all bands.
     """
     import cupy as cp
 
@@ -519,22 +550,36 @@ def eebls_gpu_fast(
 
     Instead of evaluating all integer widths from ``kmi`` to ``kma``, only
     evaluates a geometrically-spaced subset, reducing window evaluations from
-    O(kma - kmi) to O(log(kma/kmi) / log(1 + dlogq)).  Uses incremental
-    accumulation over log-spaced widths.
+    O(kma - kmi) to O(log(kma/kmi) / log(1 + dlogq)).
 
     Parameters
     ----------
-    min_points:
+    t :
+        Observation times (days), 1-D float array.
+    y :
+        Magnitudes or fluxes, 1-D float array, same length as ``t``.
+    dy :
+        1-sigma uncertainties, 1-D float array, same length as ``t``.
+    frequencies :
+        Trial frequencies (1/day).
+    nbins :
+        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        if ``None``.
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    qmax :
+        Maximum transit duration as a fraction of the period.
+    min_points :
         Minimum number of in-transit points required.
     dlogq :
-        Logarithmic spacing between trial widths.  Smaller = more widths = higher
-        fidelity but slower.  ``dlogq=0`` recovers the full linear search.
+        Logarithmic spacing between trial widths. Smaller = more widths = higher
+        fidelity but slower. ``dlogq=0`` recovers the full linear search.
         Typical range: 0.1 – 0.5.
 
     Notes
     -----
     Introduces a small (~1–2%) loss in peak power because the exact optimal
-    integer width may not fall in the log-spaced set.  For detection this is
+    integer width may not fall in the log-spaced set. For detection this is
     negligible; for precise parameter estimation use :func:`eebls_gpu` or
     :func:`eebls` at the recovered period.
     """
@@ -593,8 +638,22 @@ def multiband_eebls_gpu_fast(
 
     Parameters
     ----------
+    bands :
+        Mapping ``label -> (t, y, dy)``. Each band keeps its own baseline and
+        depth; all bands share the trial period, epoch, and duration.
+    frequencies :
+        Trial frequencies (1/day).
+    nbins :
+        Number of phase bins. Chosen automatically as ``clip(5 / qmin, 50, 500)``
+        if ``None``.
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    qmax :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required across all bands.
     dlogq :
-        Logarithmic width spacing.  Smaller = more widths = higher fidelity.
+        Logarithmic width spacing. Smaller = more widths = higher fidelity.
         Typical range: 0.1 – 0.5.
 
     Notes

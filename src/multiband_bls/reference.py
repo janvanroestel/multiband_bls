@@ -59,6 +59,13 @@ def preprocess(y: Array, dy: Array) -> tuple[Array, Array, float]:
 
     ``w_hat`` are the normalised weights (sum to 1) and ``x_tilde`` is the
     weighted-mean-subtracted signal.
+
+    Parameters
+    ----------
+    y :
+        Magnitudes or fluxes, 1-D float array.
+    dy :
+        1-sigma uncertainties, 1-D float array, same length as ``y``.
     """
     w = 1.0 / np.asarray(dy, dtype=float) ** 2
     W = w.sum()
@@ -73,6 +80,13 @@ def auto_nbins(qmin: float, n_res: int = 5) -> int:
 
     Ensures at least ``n_res`` bins span the narrowest transit (``qmin``),
     capped between 50 and 500 to keep compute tractable.
+
+    Parameters
+    ----------
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    n_res :
+        Minimum number of bins inside the narrowest transit.
     """
     return int(np.clip(round(n_res / qmin), 50, 500))
 
@@ -106,9 +120,22 @@ def build_frequency_grid(
     period (``p_min``, ``p_max``). Note the inversion: ``p_min → f_max`` and
     ``p_max → f_min``. Mixing both for the same bound raises ``ValueError``.
 
-    If ``df`` is not given it defaults to ``q_min / (oversample * baseline)``,
-    where ``q_min`` is the shortest fractional transit duration to resolve.
-    The default ``q_min=0.01`` matches :func:`eebls` and :func:`multiband_eebls`.
+    Parameters
+    ----------
+    t :
+        Observation times (days); used only to compute the baseline.
+    f_min, f_max :
+        Frequency search bounds (1/day). Mutually exclusive with ``p_min``/``p_max``.
+    p_min, p_max :
+        Period search bounds (days). Mutually exclusive with ``f_min``/``f_max``.
+        Note the inversion: ``p_min → f_max`` and ``p_max → f_min``.
+    df :
+        Frequency step (1/day). Defaults to ``q_min / (oversample * baseline)``.
+    oversample :
+        Number of frequency steps per transit peak width when ``df`` is auto-computed.
+    q_min :
+        Shortest fractional transit duration to resolve; sets the default ``df``.
+        Should match the ``qmin`` passed to the search function.
 
     Raises
     ------
@@ -531,6 +558,23 @@ def multiband_eebls_reference(
     Like :func:`multiband_sparse_bls_reference` (matched-filter weighting, returns
     ``Delta chi^2 / chi^2_flat``) but the phase-folded data of each band is binned
     onto ``nbins`` phase bins and the box is searched over bins.
+
+    Parameters
+    ----------
+    bands :
+        Mapping ``label -> (t, y, dy)``. Each band keeps its own baseline and
+        depth; all bands share the trial period, epoch, and duration.
+    frequencies :
+        Trial frequencies (1/day).
+    nbins :
+        Number of phase bins. Unlike the Cython/GPU equivalents, this defaults
+        to 300 and does not support ``None`` (no auto-selection).
+    qmin :
+        Minimum transit duration as a fraction of the period.
+    qmax :
+        Maximum transit duration as a fraction of the period.
+    min_points :
+        Minimum number of in-transit points required across all bands.
     """
     labels = tuple(bands.keys())
     n_bands = len(labels)
@@ -694,6 +738,11 @@ def coadd_bands(
 
     Each band is shifted to zero weighted mean so a single-band SBLS can be run
     on the pooled series. This is the "regular SBLS" straw-man to beat.
+
+    Parameters
+    ----------
+    bands :
+        Mapping ``label -> (t, y, dy)``. Each band is mean-subtracted before stacking.
     """
     t_parts: list[Array] = []
     y_parts: list[Array] = []
