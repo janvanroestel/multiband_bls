@@ -18,7 +18,7 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from . import _eebls, _meebls, _msbls, _sbls
+from . import _eebls, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
 from .periodogram import SBLSResult
 from .reference import auto_nbins, preprocess, variance_explained
 

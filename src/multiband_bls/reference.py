@@ -40,6 +40,7 @@ __all__ = [
 
 import logging
 from collections.abc import Mapping
+from typing import cast
 
 import numpy as np
 
@@ -263,15 +264,15 @@ def sparse_bls_reference(
         if sr > best["sr"]:
             best.update(sr=sr, t0=t0, dur=dur, depth=depth, idx=idx)
 
-    bidx = best["idx"]
+    bidx = int(best["idx"])
     return SBLSResult(
         frequency=freqs,
         power=variance_explained(power, yy),
         best_frequency=float(freqs[bidx]),
         best_period=float(1.0 / freqs[bidx]),
-        best_t0=best["t0"],
-        best_duration=best["dur"],
-        best_depth=best["depth"],
+        best_t0=float(best["t0"]),
+        best_duration=float(best["dur"]),
+        best_depth=float(best["depth"]),
         best_power=float(variance_explained(np.array([best["sr"]]), yy)[0]),
     )
 
@@ -422,19 +423,19 @@ def multiband_sparse_bls_reference(
             band_w,
         )
         power[idx] = sr
-        if sr > best["sr"]:
+        if sr > cast(float, best["sr"]):
             best.update(sr=sr, t0=t0, dur=dur, depths=depths, idx=idx)
 
-    bidx = best["idx"]
+    bidx = cast(int, best["idx"])
     return SBLSResult(
         frequency=freqs,
         power=variance_explained(power, chi2_flat),
         best_frequency=float(freqs[bidx]),
         best_period=float(1.0 / freqs[bidx]),
-        best_t0=best["t0"],
-        best_duration=best["dur"],
-        best_depth=best["depths"],
-        best_power=float(variance_explained(np.array([best["sr"]]), chi2_flat)[0]),
+        best_t0=cast(float, best["t0"]),
+        best_duration=cast(float, best["dur"]),
+        best_depth=cast(np.ndarray, best["depths"]),
+        best_power=float(variance_explained(np.array([cast(float, best["sr"])]), chi2_flat)[0]),
         bands=labels,
     )
 
@@ -570,19 +571,19 @@ def multiband_eebls_reference(
             min_points, band_w,
         )
         power[idx] = sr
-        if sr > best["sr"]:
+        if sr > cast(float, best["sr"]):
             best.update(sr=sr, t0=t0, dur=dur, depths=depths, idx=idx)
 
-    bidx = best["idx"]
+    bidx = cast(int, best["idx"])
     return SBLSResult(
         frequency=freqs,
         power=variance_explained(power, chi2_flat),
         best_frequency=float(freqs[bidx]),
         best_period=float(1.0 / freqs[bidx]),
-        best_t0=best["t0"],
-        best_duration=best["dur"],
-        best_depth=best["depths"],
-        best_power=float(variance_explained(np.array([best["sr"]]), chi2_flat)[0]),
+        best_t0=cast(float, best["t0"]),
+        best_duration=cast(float, best["dur"]),
+        best_depth=cast(np.ndarray, best["depths"]),
+        best_power=float(variance_explained(np.array([cast(float, best["sr"])]), chi2_flat)[0]),
         bands=labels,
     )
 
@@ -673,15 +674,15 @@ def eebls_reference(
         if best_sr > best["sr"]:
             best.update(sr=best_sr, t0=best_t0, dur=best_dur, depth=best_depth, idx=idx)
 
-    bidx = best["idx"]
+    bidx = int(best["idx"])
     return SBLSResult(
         frequency=freqs,
         power=variance_explained(power, yy),
         best_frequency=float(freqs[bidx]),
         best_period=float(1.0 / freqs[bidx]),
-        best_t0=best["t0"],
-        best_duration=best["dur"],
-        best_depth=best["depth"],
+        best_t0=float(best["t0"]),
+        best_duration=float(best["dur"]),
+        best_depth=float(best["depth"]),
         best_power=float(variance_explained(np.array([best["sr"]]), yy)[0]),
     )
 
