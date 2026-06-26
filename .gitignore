@@ -1,0 +1,30 @@
+# Cython build artifacts
+*.so
+*.pyd
+
+# Generated C from Cython (keep intentionally? leave tracked for --no-build-isolation)
+# *.c  ← intentionally NOT ignored; the four .c files are kept in-tree
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Python runtime
+__pycache__/
+*.py[cod]
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
