@@ -8,7 +8,7 @@ Quick start::
 
     from multiband_bls import multiband_eebls, build_frequency_grid
 
-    freqs = build_frequency_grid(t_min, t_baseline)
+    freqs = build_frequency_grid(t, p_min=0.1, p_max=1.0)
     result = multiband_eebls(bands, freqs)   # bands: {label: (t, y, dy)}
     print(result.best_period, result.best_power)
 
