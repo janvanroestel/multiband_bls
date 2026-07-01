@@ -232,6 +232,70 @@ def test_eebls_reference_matches_cython(lightcurve, freqs):
     assert ref.best_period == pytest.approx(cyt.best_period)
 
 
+def _centered(bands):
+    """Shift all bands' times by the median of the pooled times.
+
+    The fast GPU entry points median-subtract ``t`` internally (float32 range)
+    while the exact ones fold raw ``t``; the phase-bin anchor therefore differs
+    and binned BLS is sensitive to it. Centering up front makes the fast
+    kernels' internal offset zero so exact and fast bin identically.
+    """
+    off = np.median(np.concatenate([b[0] for b in bands.values()]))
+    return {k: (t - off, y, dy) for k, (t, y, dy) in bands.items()}
+
+
+@pytest.mark.skipif(not gpu_available(), reason="no usable CUDA GPU / CuPy")
+def test_gpu_fast_dense_widths_match_exact(lightcurve, freqs):
+    """With dlogq -> 0 (all integer widths) the fast kernels reproduce the
+    exact GPU periodogram to float32 precision, single band and multiband."""
+    bands, _ = lightcurve
+    bands = _centered(bands)
+    t, y, dy = coadd_bands(bands)
+    exact = eebls_gpu(t, y, dy, freqs, nbins=200, q_max=0.12, min_points=0)
+    fast = eebls_gpu_fast(t, y, dy, freqs, nbins=200, q_max=0.12,
+                          min_points=0, dlogq=1e-4)
+    np.testing.assert_allclose(fast.power, exact.power, rtol=5e-3, atol=5e-5)
+    assert fast.best_frequency == pytest.approx(exact.best_frequency)
+
+    mexact = multiband_eebls_gpu(bands, freqs, nbins=200, q_max=0.12,
+                                 min_points=0)
+    mfast = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.12,
+                                     min_points=0, dlogq=1e-4)
+    np.testing.assert_allclose(mfast.power, mexact.power, rtol=5e-3, atol=5e-5)
+    assert mfast.best_frequency == pytest.approx(mexact.best_frequency)
+
+
+@pytest.mark.skipif(not gpu_available(), reason="no usable CUDA GPU / CuPy")
+def test_gpu_fast_peak_close_to_exact(lightcurve, freqs):
+    """Default log-spaced widths lose at most a few % of the exact peak power
+    (and cannot exceed it beyond float32 noise)."""
+    bands, _ = lightcurve
+    bands = _centered(bands)
+    t, y, dy = coadd_bands(bands)
+    exact = eebls_gpu(t, y, dy, freqs, nbins=300, q_max=0.12)
+    fast = eebls_gpu_fast(t, y, dy, freqs, nbins=300, q_max=0.12)
+    assert fast.best_power <= exact.best_power * (1 + 1e-3)
+    assert fast.best_power >= exact.best_power * 0.90
+
+    mexact = multiband_eebls_gpu(bands, freqs, nbins=300, q_max=0.12)
+    mfast = multiband_eebls_gpu_fast(bands, freqs, nbins=300, q_max=0.12)
+    assert mfast.best_power <= mexact.best_power * (1 + 1e-3)
+    assert mfast.best_power >= mexact.best_power * 0.90
+
+
+@pytest.mark.skipif(not gpu_available(), reason="no usable CUDA GPU / CuPy")
+def test_gpu_fast_min_points_gate(lightcurve, freqs):
+    """An absurdly high min_points threshold suppresses every window."""
+    bands, _ = lightcurve
+    t, y, dy = coadd_bands(bands)
+    res = eebls_gpu_fast(t, y, dy, freqs, nbins=200, q_max=0.12,
+                         min_points=10**7)
+    assert np.all(res.power == 0.0)
+    mres = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.12,
+                                    min_points=10**7)
+    assert np.all(mres.power == 0.0)
+
+
 @pytest.mark.skipif(not gpu_available(), reason="no usable CUDA GPU / CuPy")
 def test_gpu_fast_variants(lightcurve, freqs):
     """eebls_gpu_fast and multiband_eebls_gpu_fast recover the period and return valid power."""
