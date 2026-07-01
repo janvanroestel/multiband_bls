@@ -37,7 +37,10 @@ logger = logging.getLogger(__name__)
 
 Array = np.ndarray
 
-_THREADS = 256  # threads per block (also the reduction array size in the kernels)
+_THREADS = 256  # threads per block. Hard-coded into the kernels: the exact
+# kernels size their static reduction as `red[256]`, and the fast kernels assume
+# exactly 256/32 = 8 warps (`warp_max[8]`). Changing this requires editing those
+# reduction sizes in the kernel source and recompiling.
 # Stack arrays in the CUDA multiband kernels are fixed-size; recompile after
 # changing _MAX_BANDS (update the s[N]/r[N]/cnt[N] declarations in the kernel source).
 _MAX_BANDS: int = 8
@@ -362,8 +365,16 @@ def _kernels() -> None:
         _multi_kernel = cp.RawKernel(_MULTI_SRC, "meebls_kernel")
         _fast_single_kernel = cp.RawKernel(_FAST_BOX_SINGLE_SRC, "eebls_fast_kernel")
         _fast_multi_kernel = cp.RawKernel(_FAST_BOX_MULTI_SRC, "meebls_fast_kernel")
-        _multi_kernel.max_dynamic_shared_size_bytes = 65536
-        _fast_multi_kernel.max_dynamic_shared_size_bytes = _max_smem
+        # Opt into the device maximum for dynamic shared memory. The requested
+        # dynamic size must leave room for the kernel's own static shared memory
+        # (the exact kernels carry a static `red[256]` reduction buffer), so
+        # subtract that from the opt-in ceiling.
+        _multi_kernel.max_dynamic_shared_size_bytes = (
+            _max_smem - _multi_kernel.attributes["shared_size_bytes"]
+        )
+        _fast_multi_kernel.max_dynamic_shared_size_bytes = (
+            _max_smem - _fast_multi_kernel.attributes["shared_size_bytes"]
+        )
     # fast kernels are accessed as module globals by the fast entry points
 
 
@@ -387,6 +398,11 @@ def _log_widths(kmi: int, kma: int, dlogq: float = 0.3) -> np.ndarray:
 def _grid_params(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
     kmi = max(1, int(q_min * nbins))
     kma = min(nbins, int(q_max * nbins) + 1)
+    # Load-bearing invariant: every kernel wraps the circular window with a single
+    # subtraction (`if (jj >= nb) jj -= nb`), which is only correct when the widest
+    # window (kma) does not exceed nbins. Violating this would silently read/write
+    # out of bounds in shared memory.
+    assert kma <= nbins, f"kma ({kma}) must not exceed nbins ({nbins})"
     return kmi, kma
 
 
@@ -522,6 +538,13 @@ def multiband_eebls_gpu(
     kmi, kma = _grid_params(nbins, q_min, q_max)
 
     shared = 3 * n_bands * nbins * 8
+    smem_cap = _multi_kernel.max_dynamic_shared_size_bytes
+    if shared > smem_cap:
+        raise ValueError(
+            f"multiband_eebls_gpu needs {shared} B of dynamic shared memory "
+            f"(3 * n_bands={n_bands} * nbins={nbins} * 8) but the device allows "
+            f"{smem_cap} B; reduce nbins or n_bands."
+        )
     _multi_kernel((nf,), (_THREADS,),
                   (t_d, wx_d, w_d, band_d, bw_d, np.int32(t_d.size), np.int32(n_bands),
                    f_d, np.int32(nbins), np.int32(kmi), np.int32(kma),
@@ -582,6 +605,12 @@ def eebls_gpu_fast(
     integer width may not fall in the log-spaced set. For detection this is
     negligible; for precise parameter estimation use :func:`eebls_gpu` or
     :func:`eebls` at the recovered period.
+
+    Unlike the exact :func:`eebls_gpu`, ``min_points`` is applied here as a
+    *weighted-fraction* threshold: this kernel tracks no per-bin count, so it
+    rejects windows whose summed normalised weight is below ``min_points / n``.
+    This matches an exact in-transit point count only when all points share the
+    same uncertainty; with heteroscedastic ``dy`` the two filters diverge.
     """
     import cupy as cp
 
@@ -693,6 +722,13 @@ def multiband_eebls_gpu_fast(
     power_d = cp.empty(nf, dtype=cp.float64)
     n_blocks = min(nf, 2048)
     shared = (3 * n_bands * nbins + 8) * 4  # float32: ybin + rbin + cbin (per band) + warp_max[8]
+    smem_cap = _fast_multi_kernel.max_dynamic_shared_size_bytes
+    if shared > smem_cap:
+        raise ValueError(
+            f"multiband_eebls_gpu_fast needs {shared} B of dynamic shared memory "
+            f"((3 * n_bands={n_bands} * nbins={nbins} + 8) * 4) but the device "
+            f"allows {smem_cap} B; reduce nbins or n_bands."
+        )
     _fast_multi_kernel(
         (n_blocks,), (_THREADS,),
         (t_d, wx_d, w_d, band_d, bw_d, np.int32(t_d.size), np.int32(n_bands),
