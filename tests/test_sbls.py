@@ -24,6 +24,8 @@ from multiband_bls import (
     sparse_bls,
     sparse_bls_reference,
 )
+from multiband_bls.gpu import _log_widths
+from multiband_bls.reference import auto_nbins, preprocess
 
 
 @dataclass
@@ -322,3 +324,55 @@ def test_coadd_bands():
     # each band is mean-subtracted: the weighted mean of each segment should be ~0
     assert abs(np.average(y[:10], weights=1 / dy1 ** 2)) < 1e-10
     assert abs(np.average(y[10:], weights=1 / dy2 ** 2)) < 1e-10
+
+
+def test_auto_nbins_clips():
+    """auto_nbins = clip(round(n_res / q_min), 50, 500)."""
+    assert auto_nbins(0.1) == 50           # round(50) inside range
+    assert auto_nbins(0.01) == 500         # round(500) at the cap
+    assert auto_nbins(0.5) == 50           # 10 -> floor clamp
+    assert auto_nbins(1e-4) == 500         # 50000 -> ceil clamp
+    assert auto_nbins(0.01, n_res=1) == 100  # n_res scales the target
+
+
+def test_log_widths_span_sorted_unique():
+    """_log_widths spans [kmi, kma], is sorted and unique, and includes both ends."""
+    w = _log_widths(3, 60, dlogq=0.3)
+    assert w[0] == 3 and w[-1] == 60
+    assert list(w) == sorted(set(w.tolist()))
+    assert w.min() >= 3 and w.max() <= 60
+    # dlogq -> 0 recovers the full linear set kmi..kma
+    assert list(_log_widths(3, 10, dlogq=0.0)) == list(range(3, 11))
+
+
+def test_preprocess_normalisation():
+    """preprocess returns unit-sum weights and a zero-weighted-mean signal."""
+    rng = np.random.default_rng(3)
+    y = rng.normal(15.0, 0.5, 50)
+    dy = rng.uniform(0.01, 0.05, 50)
+    w_hat, x_tilde, mu = preprocess(y, dy)
+    assert w_hat.sum() == pytest.approx(1.0)
+    assert np.sum(w_hat * x_tilde) == pytest.approx(0.0, abs=1e-12)
+    assert mu == pytest.approx(np.average(y, weights=1 / dy ** 2))
+
+
+def test_multiband_eebls_reference_auto_nbins():
+    """multiband_eebls_reference(nbins=None) auto-selects via auto_nbins."""
+    rng = np.random.default_rng(5)
+    bands = {b: (np.sort(rng.uniform(0, 50, 20)),
+                 rng.normal(20.0, 0.03, 20), np.full(20, 0.03))
+             for b in ("g", "r")}
+    freqs = np.linspace(1.0, 3.0, 5)
+    auto = multiband_eebls_reference(bands, freqs, q_min=0.1, q_max=0.3)
+    explicit = multiband_eebls_reference(bands, freqs, nbins=auto_nbins(0.1),
+                                         q_min=0.1, q_max=0.3)
+    np.testing.assert_array_equal(auto.power, explicit.power)
+
+
+def test_single_point_light_curve_does_not_crash():
+    """A degenerate 1-point light curve yields finite, all-zero power (no divide-by-zero)."""
+    t, y, dy = np.array([5.0]), np.array([20.0]), np.array([0.1])
+    freqs = np.linspace(1.0, 2.0, 10)
+    res = eebls(t, y, dy, freqs, nbins=50, q_max=0.1, min_points=1)
+    assert np.all(np.isfinite(res.power))
+    assert np.all(res.power == 0.0)  # zero variance -> nothing explained
