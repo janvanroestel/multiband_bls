@@ -7,9 +7,12 @@ __all__ = ["BLSResult"]
 from dataclasses import dataclass
 
 import numpy as np
+import numpy.typing as npt
+
+Array = npt.NDArray[np.float64]
 
 
-@dataclass
+@dataclass(frozen=True)
 class BLSResult:
     """Outcome of a Sparse BLS search.
 
@@ -37,17 +40,17 @@ class BLSResult:
         Band labels for a multiband result, else ``None``.
     """
 
-    frequency: np.ndarray
-    power: np.ndarray
+    frequency: Array
+    power: Array
     best_frequency: float
     best_period: float
     best_t0: float
     best_duration: float
-    best_depth: float | np.ndarray
+    best_depth: float | Array
     best_power: float
     bands: tuple[str, ...] | None = None
 
     @property
-    def period(self) -> np.ndarray:
+    def period(self) -> Array:
         """Trial periods (days), i.e. ``1 / frequency``."""
         return 1.0 / self.frequency

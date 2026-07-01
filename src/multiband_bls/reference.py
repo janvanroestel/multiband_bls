@@ -43,12 +43,13 @@ from collections.abc import Mapping
 from typing import cast
 
 import numpy as np
+import numpy.typing as npt
 
 from .periodogram import BLSResult
 
 logger = logging.getLogger(__name__)
 
-Array = np.ndarray
+Array = npt.NDArray[np.float64]
 
 
 # --------------------------------------------------------------------------- #
@@ -73,6 +74,46 @@ def preprocess(y: Array, dy: Array) -> tuple[Array, Array, float]:
     mu = float(np.sum(w_hat * np.asarray(y, dtype=float)))
     x_tilde = np.asarray(y, dtype=float) - mu
     return w_hat, x_tilde, mu
+
+
+def _merge_band_arrays(
+    bands: Mapping[str, tuple[Array, Array, Array]]
+) -> tuple[Array, Array, Array, Array, tuple[str, ...], Array, float]:
+    """Preprocess each band and concatenate into all-band arrays.
+
+    Returns ``(t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat)``
+    where ``wx = w_hat * x_tilde`` uses each band's own normalised weights,
+    ``band_all`` labels each point with its band index, ``band_w[b] = sum_i
+    1/sigma^2`` per band, and ``chi2_flat = sum_b sum_i (x_tilde/sigma)^2`` is
+    the total flat-model chi^2. Shared by the multiband reference entry points
+    and (wrapped with contiguity/dtype coercion) by :func:`api._merge_bands`.
+    """
+    labels = tuple(bands.keys())
+    t_parts: list[Array] = []
+    wx_parts: list[Array] = []
+    w_parts: list[Array] = []
+    band_parts: list[Array] = []
+    w_totals: list[float] = []
+    chi2_flat = 0.0
+    for bi, label in enumerate(labels):
+        t_b, y_b, dy_b = bands[label]
+        w_hat, x_tilde, _ = preprocess(y_b, dy_b)
+        w_raw = 1.0 / np.asarray(dy_b, dtype=float) ** 2
+        w_totals.append(float(w_raw.sum()))
+        chi2_flat += float(np.sum(w_raw * x_tilde ** 2))
+        t_parts.append(np.asarray(t_b, dtype=float))
+        wx_parts.append(w_hat * x_tilde)
+        w_parts.append(w_hat)
+        band_parts.append(np.full(len(t_b), bi, dtype=np.int64))
+    return (
+        np.concatenate(t_parts),
+        np.concatenate(wx_parts),
+        np.concatenate(w_parts),
+        np.concatenate(band_parts),
+        labels,
+        np.asarray(w_totals, dtype=float),
+        chi2_flat,
+    )
 
 
 def auto_nbins(q_min: float, n_res: int = 5) -> int:
@@ -398,31 +439,8 @@ def multiband_sparse_bls_reference(
     frequencies, q_max, min_points:
         As in :func:`sparse_bls_reference`.
     """
-    labels = tuple(bands.keys())
+    t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
     n_bands = len(labels)
-
-    t_parts: list[Array] = []
-    wx_parts: list[Array] = []
-    w_parts: list[Array] = []
-    band_parts: list[Array] = []
-    w_totals: list[float] = []
-    chi2_flat = 0.0
-    for bi, label in enumerate(labels):
-        t_b, y_b, dy_b = bands[label]
-        w_hat, x_tilde, _ = preprocess(y_b, dy_b)
-        w_raw = 1.0 / np.asarray(dy_b, dtype=float) ** 2
-        w_totals.append(float(w_raw.sum()))
-        chi2_flat += float(np.sum(w_raw * x_tilde ** 2))
-        t_parts.append(np.asarray(t_b, dtype=float))
-        wx_parts.append(w_hat * x_tilde)
-        w_parts.append(w_hat)
-        band_parts.append(np.full(len(t_b), bi, dtype=np.int64))
-
-    t_all = np.concatenate(t_parts)
-    wx_all = np.concatenate(wx_parts)
-    w_all = np.concatenate(w_parts)
-    band_all = np.concatenate(band_parts)
-    band_w = np.asarray(w_totals, dtype=float)
 
     freqs = np.asarray(frequencies, dtype=float)
     power = np.zeros(freqs.shape[0])
@@ -545,7 +563,7 @@ def _meebls_period(
 def multiband_eebls_reference(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
-    nbins: int = 300,
+    nbins: int | None = None,
     q_min: float = 0.01,
     q_max: float = 0.10,
     min_points: int = 3,
@@ -567,8 +585,8 @@ def multiband_eebls_reference(
     frequencies :
         Trial frequencies (1/day).
     nbins :
-        Number of phase bins. Unlike the Cython/GPU equivalents, this defaults
-        to 300 and does not support ``None`` (no auto-selection).
+        Number of phase bins. Chosen automatically via :func:`auto_nbins` if
+        ``None``, matching the Cython/GPU equivalents.
     q_min :
         Minimum transit duration as a fraction of the period.
     q_max :
@@ -576,33 +594,13 @@ def multiband_eebls_reference(
     min_points :
         Minimum number of in-transit points required across all bands.
     """
-    labels = tuple(bands.keys())
-    n_bands = len(labels)
+    if nbins is None:
+        nbins = auto_nbins(q_min)
     kmi = max(1, int(q_min * nbins))
     kma = min(nbins, int(q_max * nbins) + 1)
 
-    t_parts: list[Array] = []
-    wx_parts: list[Array] = []
-    w_parts: list[Array] = []
-    band_parts: list[Array] = []
-    w_totals: list[float] = []
-    chi2_flat = 0.0
-    for bi, label in enumerate(labels):
-        t_b, y_b, dy_b = bands[label]
-        w_hat, x_tilde, _ = preprocess(y_b, dy_b)
-        w_raw = 1.0 / np.asarray(dy_b, dtype=float) ** 2
-        w_totals.append(float(w_raw.sum()))
-        chi2_flat += float(np.sum(w_raw * x_tilde ** 2))
-        t_parts.append(np.asarray(t_b, dtype=float))
-        wx_parts.append(w_hat * x_tilde)
-        w_parts.append(w_hat)
-        band_parts.append(np.full(len(t_b), bi, dtype=np.int64))
-
-    t_all = np.concatenate(t_parts)
-    wx_all = np.concatenate(wx_parts)
-    w_all = np.concatenate(w_parts)
-    band_all = np.concatenate(band_parts)
-    band_w = np.asarray(w_totals, dtype=float)
+    t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
+    n_bands = len(labels)
 
     freqs = np.asarray(frequencies, dtype=float)
     power = np.zeros(freqs.shape[0])

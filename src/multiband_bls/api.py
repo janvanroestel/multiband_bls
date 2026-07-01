@@ -17,14 +17,15 @@ import logging
 from collections.abc import Mapping
 
 import numpy as np
+import numpy.typing as npt
 
 from . import _eebls, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
 from .periodogram import BLSResult
-from .reference import auto_nbins, preprocess, variance_explained
+from .reference import _merge_band_arrays, auto_nbins, preprocess, variance_explained
 
 logger = logging.getLogger(__name__)
 
-Array = np.ndarray
+Array = npt.NDArray[np.float64]
 
 
 def _preprocess_single(
@@ -53,31 +54,18 @@ def _merge_bands(
     ``band_idx`` labels each point with its band index, ``w_totals[b] =
     sum_i 1/sigma^2`` per band, and ``chi2_flat`` is the total flat-model chi^2
     (``sum_b sum_i (x_tilde/sigma)^2``). Shared by the multiband entry points.
+
+    Thin wrapper over :func:`reference._merge_band_arrays` that makes the arrays
+    C-contiguous with the dtypes the Cython cores require.
     """
-    labels = tuple(bands.keys())
-    t_parts: list[Array] = []
-    wx_parts: list[Array] = []
-    w_parts: list[Array] = []
-    band_parts: list[Array] = []
-    w_totals: list[float] = []
-    chi2_flat = 0.0
-    for bi, label in enumerate(labels):
-        t_b, y_b, dy_b = bands[label]
-        w_hat, x_tilde, _ = preprocess(y_b, dy_b)
-        w_raw = 1.0 / np.asarray(dy_b, dtype=np.float64) ** 2
-        w_totals.append(float(w_raw.sum()))
-        chi2_flat += float(np.sum(w_raw * x_tilde ** 2))
-        t_parts.append(np.asarray(t_b, dtype=np.float64))
-        wx_parts.append(w_hat * x_tilde)
-        w_parts.append(w_hat)
-        band_parts.append(np.full(len(t_b), bi, dtype=np.int64))
+    t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_band_arrays(bands)
     return (
-        np.ascontiguousarray(np.concatenate(t_parts), dtype=np.float64),
-        np.ascontiguousarray(np.concatenate(wx_parts), dtype=np.float64),
-        np.ascontiguousarray(np.concatenate(w_parts), dtype=np.float64),
-        np.ascontiguousarray(np.concatenate(band_parts), dtype=np.int64),
+        np.ascontiguousarray(t_all, dtype=np.float64),
+        np.ascontiguousarray(wx_all, dtype=np.float64),
+        np.ascontiguousarray(w_all, dtype=np.float64),
+        np.ascontiguousarray(band_all, dtype=np.int64),
         labels,
-        np.asarray(w_totals, dtype=np.float64),
+        np.ascontiguousarray(w_totals, dtype=np.float64),
         chi2_flat,
     )
 

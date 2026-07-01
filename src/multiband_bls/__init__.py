@@ -25,7 +25,14 @@ to pure-Python reference implementations automatically (with a warning).
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 from .periodogram import BLSResult
+
+try:
+    __version__ = version("multiband_bls")
+except PackageNotFoundError:  # pragma: no cover - source tree without install
+    __version__ = "0.0.0"
 from .reference import (
     build_frequency_grid,
     coadd_bands,
@@ -57,8 +64,9 @@ except ImportError:  # pragma: no cover
     multiband_eebls = multiband_eebls_reference  # type: ignore[assignment]
 
 # GPU (CuPy) backends -- import lazily; cupy itself is only needed at call time.
-# When unavailable, GPU names are set to None. Always call gpu_available() before
-# using eebls_gpu / multiband_eebls_gpu or their _fast variants.
+# When the module can't be imported at all (missing compiled cores), the GPU
+# names are bound to stubs that raise a clear ImportError when called, rather
+# than None (which would fail later with a confusing `NoneType is not callable`).
 try:
     from .gpu import (  # noqa: E402
         eebls_gpu,
@@ -68,13 +76,22 @@ try:
         multiband_eebls_gpu_fast,
     )
 except ImportError:  # pragma: no cover - needs the compiled cores
-    eebls_gpu = multiband_eebls_gpu = None  # type: ignore[assignment]
-    eebls_gpu_fast = multiband_eebls_gpu_fast = None  # type: ignore[assignment]
+
+    def _gpu_unavailable(*args: object, **kwargs: object) -> BLSResult:
+        raise ImportError(
+            "GPU backend unavailable (compiled cores not importable). "
+            "Build the package (`pip install -e .`) and install CuPy "
+            "(`pip install cupy-cuda12x`) to use the GPU entry points."
+        )
+
+    eebls_gpu = multiband_eebls_gpu = _gpu_unavailable  # type: ignore[assignment]
+    eebls_gpu_fast = multiband_eebls_gpu_fast = _gpu_unavailable  # type: ignore[assignment]
 
     def gpu_available() -> bool:  # type: ignore[misc]
         return False
 
 __all__ = [
+    "__version__",
     "BLSResult",
     "sparse_bls",
     "multiband_sparse_bls",
