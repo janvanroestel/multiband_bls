@@ -31,7 +31,7 @@ import numpy as np
 
 from .api import _merge_bands, _preprocess_single, eebls, multiband_eebls
 from .periodogram import BLSResult
-from .reference import auto_nbins
+from .reference import auto_nbins, variance_explained
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +369,9 @@ def _kernels() -> None:
         # dynamic size must leave room for the kernel's own static shared memory
         # (the exact kernels carry a static `red[256]` reduction buffer), so
         # subtract that from the opt-in ceiling.
+        _single_kernel.max_dynamic_shared_size_bytes = (
+            _max_smem - _single_kernel.attributes["shared_size_bytes"]
+        )
         _multi_kernel.max_dynamic_shared_size_bytes = (
             _max_smem - _multi_kernel.attributes["shared_size_bytes"]
         )
@@ -401,8 +404,9 @@ def _grid_params(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
     # Load-bearing invariant: every kernel wraps the circular window with a single
     # subtraction (`if (jj >= nb) jj -= nb`), which is only correct when the widest
     # window (kma) does not exceed nbins. Violating this would silently read/write
-    # out of bounds in shared memory.
-    assert kma <= nbins, f"kma ({kma}) must not exceed nbins ({nbins})"
+    # out of bounds in shared memory. Raise (not assert) so `python -O` keeps it.
+    if kma > nbins:
+        raise ValueError(f"kma ({kma}) must not exceed nbins ({nbins})")
     return kmi, kma
 
 
@@ -413,7 +417,7 @@ def _result(
     refine_fn: Callable[[float], BLSResult],
     bands: tuple[str, ...] | None = None,
 ) -> BLSResult:
-    power = power_raw / chi2_flat
+    power = variance_explained(power_raw, chi2_flat)
     best_idx = int(np.argmax(power))
     best_freq = float(frequencies[best_idx])
     ref = refine_fn(best_freq)
@@ -476,6 +480,13 @@ def eebls_gpu(
     nf = int(f_d.size)
     kmi, kma = _grid_params(nbins, q_min, q_max)
     shared = 3 * nbins * 8  # ybin/rbin/cbin (float64)
+    smem_cap = _single_kernel.max_dynamic_shared_size_bytes
+    if shared > smem_cap:
+        raise ValueError(
+            f"eebls_gpu needs {shared} B of dynamic shared memory "
+            f"(3 * nbins={nbins} * 8) but the device allows {smem_cap} B; "
+            f"reduce nbins."
+        )
 
     power_d = cp.empty(nf, dtype=cp.float64)
     _single_kernel((nf,), (_THREADS,),

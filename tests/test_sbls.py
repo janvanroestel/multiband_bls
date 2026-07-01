@@ -201,6 +201,31 @@ def test_gpu_matches_cpu(lightcurve, freqs):
     assert mg.best_frequency == pytest.approx(mc.best_frequency)
 
 
+@pytest.mark.skipif(not gpu_available(), reason="no usable CUDA GPU / CuPy")
+def test_gpu_rejects_oversized_nbins(lightcurve, freqs):
+    """nbins so large the phase bins exceed device shared memory raises ValueError."""
+    bands, _ = lightcurve
+    t, y, dy = coadd_bands(bands)
+    huge = 10 ** 6  # 3 * huge * 8 bytes far exceeds any device's shared memory
+    with pytest.raises(ValueError, match="shared memory"):
+        eebls_gpu(t, y, dy, freqs, nbins=huge)
+    with pytest.raises(ValueError, match="shared memory"):
+        multiband_eebls_gpu(bands, freqs, nbins=huge)
+
+
+@pytest.mark.skipif(not gpu_available(), reason="no usable CUDA GPU / CuPy")
+def test_gpu_multiband_rejects_too_many_bands(freqs):
+    """More than the kernel's fixed band cap raises a clear ValueError."""
+    rng = np.random.default_rng(1)
+    bands = {
+        str(i): (np.sort(rng.uniform(0, 100, 20)),
+                 rng.normal(20, 0.03, 20), np.full(20, 0.03))
+        for i in range(9)  # _MAX_BANDS is 8
+    }
+    with pytest.raises(ValueError, match="bands"):
+        multiband_eebls_gpu(bands, freqs)
+
+
 def test_matches_astropy_box_least_squares(lightcurve):
     """Peak frequency agrees with astropy's independent BLS on the same data."""
     astropy_bls = pytest.importorskip("astropy.timeseries").BoxLeastSquares
