@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it and the papers below."
+title: "multiband_bls: Sparse and multiband Box-fitting Least Squares for multi-band light curves"
+authors:
+  - family-names: "van Roestel"
+    given-names: "Jan"
+    email: "joannes.vanroestel@ist.ac.at"
+license: MIT
+repository-code: "https://github.com/janvanroestel/multiband_bls"
+keywords:
+  - astronomy
+  - transit
+  - BLS
+  - periodogram
+  - LSST
+  - eclipsing binary
+references:
+  - type: article
+    authors:
+      - family-names: "Panahi"
+        given-names: "Aviad"
+      - family-names: "Zucker"
+        given-names: "Shay"
+    title: "The Sparse Box-fitting Least-squares Algorithm"
+    journal: "Publications of the Astronomical Society of the Pacific"
+    volume: 133
+    issue: 1021
+    year: 2021
+    doi: "10.1088/1538-3873/abe533"
+  - type: article
+    authors:
+      - family-names: "Kovács"
+        given-names: "Géza"
+      - family-names: "Zucker"
+        given-names: "Shay"
+      - family-names: "Mazeh"
+        given-names: "Tsevi"
+    title: "A box-fitting algorithm in the detection of periodic transits"
+    journal: "Astronomy & Astrophysics"
+    volume: 391
+    year: 2002
+    doi: "10.1051/0004-6361:20020802"

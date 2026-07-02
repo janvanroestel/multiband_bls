@@ -1,1 +1,3 @@
 include src/multiband_bls/*.c
+include src/multiband_bls/*.pyx
+include LICENSE
