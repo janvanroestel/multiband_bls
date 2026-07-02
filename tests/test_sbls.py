@@ -95,7 +95,7 @@ def test_recovers_injected_period(lightcurve, freqs):
     # within one frequency bin of the truth
     assert abs(mc.best_frequency - 1.0 / truth.period) < 2e-4
     # per-band depths in the right order of magnitude (u deepest, y shallowest)
-    depths = {b: d for b, d in zip(mc.bands, mc.best_depth)}
+    depths = dict(zip(mc.bands, mc.best_depth))
     assert depths["u"] > depths["y"]
 
 
@@ -148,7 +148,7 @@ def test_multiband_eebls_recovers_period(lightcurve, freqs):
     bands, truth = lightcurve
     mc = multiband_eebls(bands, freqs, nbins=200, q_max=0.12)
     assert abs(mc.best_frequency - 1.0 / truth.period) < 2e-4
-    depths = {b: d for b, d in zip(mc.bands, mc.best_depth)}
+    depths = dict(zip(mc.bands, mc.best_depth))
     assert depths["u"] > depths["y"]  # bluest eclipse deepest
 
 
@@ -184,7 +184,7 @@ def test_power_is_variance_explained(lightcurve, freqs):
         "multi_ee": multiband_eebls(bands, freqs, nbins=200, q_max=0.12),
     }
     for name, res in results.items():
-        assert 0.0 <= res.power.min(), name
+        assert res.power.min() >= 0.0, name
         assert res.power.max() <= 1.0 + 1e-9, name
         assert res.best_power == pytest.approx(res.power.max()), name
 

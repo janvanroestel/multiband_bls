@@ -27,7 +27,7 @@ classifiers = [
 dependencies = ["numpy>=1.23"]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "astropy>=5.0"]
+test = ["pytest>=7.0", "pytest-cov>=4.0", "astropy>=5.0"]
 
 [project.urls]
 Homepage = "https://github.com/jcjvanroestel/multiband_bls"
@@ -44,18 +44,43 @@ multiband_bls = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config --cov=multiband_bls --cov-report=term-missing --cov-fail-under=90"
 markers = [
     "gpu: requires a CUDA-capable GPU and CuPy",
     "slow: long-running tests",
 ]
 
+[tool.coverage.run]
+# gpu.py needs a CUDA device + CuPy, which CI runners lack; its logic is
+# covered by the GPU-gated tests on GPU-capable runners instead. Omit it so
+# the coverage gate reflects the code CI can actually exercise.
+omit = ["*/gpu.py"]
+
 [tool.ruff]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP"]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "NPY", "RUF"]
+ignore = [
+    "RUF001", "RUF002", "RUF003",  # ambiguous unicode: ×, – etc. are intentional in docs
+    "RUF022",                       # __all__ grouped by category, not sorted
+    "SIM108",                       # if/else kept for the commented duration-branch logic
+]
 
 [tool.mypy]
 python_version = "3.9"
-strict = false
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+# CuPy, Cython and the compiled Cython cores ship no type information; scope the
+# missing-import waiver to them rather than silencing every unresolved import.
+[[tool.mypy.overrides]]
+module = [
+    "cupy.*",
+    "Cython.*",
+    "multiband_bls._eebls",
+    "multiband_bls._meebls",
+    "multiband_bls._msbls",
+    "multiband_bls._sbls",
+]
 ignore_missing_imports = true

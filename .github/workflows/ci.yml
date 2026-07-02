@@ -6,7 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package and lint tools
+        run: pip install -e ".[test]" ruff mypy
+
+      - name: Ruff
+        run: ruff check src/ tests/
+
+      - name: mypy
+        run: mypy src/multiband_bls/
+
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -24,12 +47,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install package and test dependencies
-        run: pip install -e ".[test]" ruff mypy
-
-      - name: Lint
-        run: |
-          ruff check src/ tests/
-          mypy src/multiband_bls/
+        run: pip install -e ".[test]"
 
       - name: Run tests
         run: pytest tests/ -v

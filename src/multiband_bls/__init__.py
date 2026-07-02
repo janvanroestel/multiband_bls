@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover
 # names are bound to stubs that raise a clear ImportError when called, rather
 # than None (which would fail later with a confusing `NoneType is not callable`).
 try:
-    from .gpu import (  # noqa: E402
+    from .gpu import (
         eebls_gpu,
         eebls_gpu_fast,
         gpu_available,

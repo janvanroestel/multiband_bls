@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from .api import _merge_bands, _preprocess_single, eebls, multiband_eebls
 from .periodogram import BLSResult
@@ -35,7 +36,7 @@ from .reference import auto_nbins, variance_explained
 
 logger = logging.getLogger(__name__)
 
-Array = np.ndarray
+Array = npt.NDArray[np.float64]
 
 _THREADS = 256  # threads per block. Hard-coded into the kernels: the exact
 # kernels size their static reduction as `red[256]`, and the fast kernels assume
@@ -393,7 +394,7 @@ def _log_widths(kmi: int, kma: int, dlogq: float = 0.3) -> np.ndarray:
     w = kmi
     while w <= kma:
         widths.add(w)
-        w = max(w + 1, int(ceil(w * (1.0 + dlogq))))
+        w = max(w + 1, ceil(w * (1.0 + dlogq)))
     widths.add(kma)
     return np.array(sorted(widths), dtype=np.int32)
 
