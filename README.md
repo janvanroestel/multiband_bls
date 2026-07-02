@@ -168,16 +168,21 @@ per trial frequency, with shared-memory phase bins. The periodogram runs entirel
 the GPU; the best period's `t0`/duration/depth are recomputed once on the CPU. Returns
 the same `BLSResult` as the Cython core.
 
-`eebls_gpu_fast` and `multiband_eebls_gpu_fast` trade float64 → float32 and add a
-prefix-sum + warp-shuffle reduction for additional throughput at the cost of
-~single-precision accuracy. The `dlogq` parameter (default 0.3) controls the
-log-spacing of transit-width samples; smaller values give denser coverage at
-higher compute cost. We thank `cuvarbase` by John Hoffman for these tricks to
-speed up BLS on the GPU.
+`eebls_gpu_fast` and `multiband_eebls_gpu_fast` trade float64 → float32 for
+additional throughput at the cost of ~single-precision accuracy: phase bins are
+converted to prefix sums (each trial window is an O(1) lookup), only a
+log-spaced subset of transit widths is evaluated, and the phase fold runs in
+float-float (two-float32) arithmetic — several times faster than float64 on
+consumer GPUs at ~1e-10 phase error. The `dlogq` parameter (default 0.3)
+controls the log-spacing of transit-width samples; smaller values give denser
+coverage at higher compute cost. In the fast variants `min_points` is enforced
+as a weighted fraction of the total statistical weight rather than an exact
+in-transit count (identical for homoscedastic uncertainties). We thank
+`cuvarbase` by John Hoffman for the tricks that inspired the fast kernels.
 
-> **Note:** `multiband_eebls_reference` has a fixed `nbins=300` default (no
-> auto-selection), unlike the Cython/GPU functions where `nbins=None` triggers
-> automatic bin-count selection via `auto_nbins(q_min)`.
+> **Note:** all binned entry points (Cython, GPU, and the pure-Python
+> references) accept `nbins=None` to auto-select the bin count via
+> `auto_nbins(q_min)`.
 
 `gpu_available()` returns `True` if a usable CUDA GPU is detected.
 
