@@ -9,7 +9,7 @@ in different bands.
 The multiband method searches for step-function-like signals in multiple bands
 where the duration and phase of a signal is shared between bands, but the depth
 of the step-function is different per band. The multiband search shares one 
-grid of **period, epoch, and duration** across all bands while fitting an 
+grid of **period, epoch, and duration** across all bands while fitting a
 **depth per band**, combined with **matched-filter weighting** 
 (each band weighted by `W_b = Σ 1/σ²`) — the
 generalized likelihood-ratio optimum for a shared transit shape with free per-band
@@ -172,7 +172,7 @@ the same `BLSResult` as the Cython core.
 prefix-sum + warp-shuffle reduction for additional throughput at the cost of
 ~single-precision accuracy. The `dlogq` parameter (default 0.3) controls the
 log-spacing of transit-width samples; smaller values give denser coverage at
-higher compute cost. We thank `cuvarbase' by John Hoffman for these tricks to 
+higher compute cost. We thank `cuvarbase` by John Hoffman for these tricks to
 speed up BLS on the GPU.
 
 > **Note:** `multiband_eebls_reference` has a fixed `nbins=300` default (no
