@@ -19,7 +19,10 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Match the mypy target (python_version = "3.9"): a newer interpreter
+          # pulls a numpy whose type stubs use 3.12-only `type` statements, which
+          # mypy cannot parse under a 3.9 target.
+          python-version: "3.9"
 
       - name: Install package and lint tools
         run: pip install -e ".[test]" ruff mypy
