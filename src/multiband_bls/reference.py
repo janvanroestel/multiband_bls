@@ -363,7 +363,8 @@ def _multiband_period(
 
     A single contiguous phase block (shared across bands) is grown over the
     *merged* phase-sorted samples; each band accumulates its own ``s_b, r_b``
-    and the combined statistic is ``sqrt(sum_b s_b^2 / (r_b (1 - r_b)))``.
+    and the combined statistic is
+    ``sqrt(sum_b band_w[b] * s_b^2 / (r_b (1 - r_b)))``.
 
     ``min_points`` is the minimum *total* number of in-transit points in the
     window; any band with at least one in-transit point (and ``0 < r_b < 1``)

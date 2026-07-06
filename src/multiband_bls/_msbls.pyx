@@ -3,10 +3,10 @@
 
 Generalises the single-band SBLS to ``B`` bands that share one trial period,
 epoch and duration, but each fit their own baseline and depth. The combined
-statistic is ``sqrt(sum_b s_b^2 / (r_b (1 - r_b)))``. ``min_points`` is the
+statistic is ``sqrt(sum_b band_w[b] * s_b^2 / (r_b (1 - r_b)))``. ``min_points`` is the
 minimum *total* number of in-transit points; any band with >= 1 in-transit
 point contributes. Mirrors
-:func:`multiband_bls.reference.multiband_bls_reference`.
+:func:`multiband_bls.reference.multiband_sparse_bls_reference`.
 """
 
 import numpy as np

@@ -30,8 +30,8 @@ dependencies = ["numpy>=1.23"]
 test = ["pytest>=7.0", "pytest-cov>=4.0", "astropy>=5.0"]
 
 [project.urls]
-Homepage = "https://github.com/jcjvanroestel/multiband_bls"
-Repository = "https://github.com/jcjvanroestel/multiband_bls"
+Homepage = "https://github.com/janvanroestel/multiband_bls"
+Repository = "https://github.com/janvanroestel/multiband_bls"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

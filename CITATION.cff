@@ -4,7 +4,7 @@ title: "multiband_bls: Sparse and multiband Box-fitting Least Squares for multi-
 authors:
   - family-names: "van Roestel"
     given-names: "Jan"
-    email: "joannes.vanroestel@ist.ac.at"
+    email: "jcjvanroestel@gmail.com"
 license: MIT
 repository-code: "https://github.com/janvanroestel/multiband_bls"
 keywords:
