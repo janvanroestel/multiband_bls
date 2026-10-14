@@ -1,3 +1,5 @@
-include src/multiband_bls/*.c
 include src/multiband_bls/*.pyx
 include LICENSE
+# setuptools auto-adds cythonized extension sources (the generated .c); ship
+# only the .pyx so every build cythonizes with its own Cython/NumPy.
+exclude src/multiband_bls/*.c

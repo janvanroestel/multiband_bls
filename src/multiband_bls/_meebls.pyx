@@ -16,7 +16,7 @@ multiband factor. Mirrors
 
 import numpy as np
 cimport numpy as cnp
-from libc.math cimport floor
+from libc.math cimport floor, NAN
 
 cnp.import_array()
 
@@ -28,7 +28,10 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
                          double* ybin, double* rbin, long* cbin,
                          double* s, double* r, long* cnt,
                          double* depths, double* out) noexcept nogil:
-    """Fill ``out = [SR, t0, duration]`` and ``depths[n_bands]`` for one period.
+    """Fill ``out = [SR, t0, duration, k]`` and ``depths[n_bands]`` for one period.
+
+    ``k`` is the number of bands contributing to the best window (0 if no
+    window was selected); depths of non-contributing bands are NaN.
 
     ``ybin, rbin, cbin`` are ``n_bands*nb`` flattened bin buffers; ``s, r, cnt,
     depths`` are length-``n_bands`` scratch buffers (all overwritten).
@@ -38,10 +41,10 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
     cdef long b
     cdef double ph, denom, sr2, phi_mid
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0
-    cdef bint ok
+    cdef int kk, best_k = 0
 
     for bb in range(n_bands):
-        depths[bb] = 0.0
+        depths[bb] = NAN
     for j in range(n_bands * nb):
         ybin[j] = 0.0
         rbin[j] = 0.0
@@ -80,7 +83,7 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
             if total < min_points:
                 continue
             sr2 = 0.0
-            ok = False
+            kk = 0
             for bb in range(n_bands):
                 if cnt[bb] < 1:
                     continue
@@ -88,11 +91,12 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
                 if denom <= 0.0:
                     continue
                 sr2 += band_w[bb] * s[bb] * s[bb] / denom
-                ok = True
-            if not ok:
+                kk += 1
+            if kk == 0:
                 continue
             if sr2 > best_sr:
                 best_sr = sr2
+                best_k = kk
                 best_dur = (<double>width) / nb * period
                 phi_mid = (i1 + 0.5 * width) / nb
                 phi_mid -= floor(phi_mid)
@@ -102,11 +106,12 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
                     if cnt[bb] >= 1 and denom > 0.0:
                         depths[bb] = s[bb] / denom
                     else:
-                        depths[bb] = 0.0
+                        depths[bb] = NAN
 
     out[0] = best_sr
     out[1] = best_t0
     out[2] = best_dur
+    out[3] = best_k
 
 
 def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
@@ -116,7 +121,7 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
 
     Inputs are the merged (all-band) arrays: ``t``, ``wx = w_hat * x_tilde`` with
     per-band normalised weights, ``w_hat``, and integer ``band`` labels. Returns
-    ``(power, best_freq, t0, dur, depths[n_bands], sr)``.
+    ``(power, best_freq, t0, dur, depths[n_bands], sr, k_used[nf])``.
     """
     cdef Py_ssize_t nf = freqs.shape[0]
     cdef Py_ssize_t n = t.shape[0]
@@ -131,7 +136,9 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
 
     cdef cnp.ndarray[double, ndim=1] power = np.zeros(nf, dtype=np.float64)
     cdef double[::1] pw = power
-    cdef cnp.ndarray[double, ndim=1] best_depths = np.zeros(n_bands, dtype=np.float64)
+    cdef cnp.ndarray[double, ndim=1] best_depths = np.full(n_bands, np.nan, dtype=np.float64)
+    cdef cnp.ndarray[cnp.int64_t, ndim=1] k_used = np.zeros(nf, dtype=np.int64)
+    cdef cnp.int64_t[::1] ku = k_used
     cdef double[::1] bd = best_depths
 
     cdef double[::1] ybin = np.empty(n_bands * nb, dtype=np.float64)
@@ -142,7 +149,7 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
     cdef long[::1] cnt_buf = np.empty(n_bands, dtype=np.int64)
     cdef double[::1] dep_buf = np.empty(n_bands, dtype=np.float64)
 
-    cdef double out[3]
+    cdef double out[4]
     cdef double period, f
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0
     cdef double best_freq = freqs[0]
@@ -157,6 +164,7 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
                            &ybin[0], &rbin[0], &cbin[0], &s_buf[0], &r_buf[0],
                            &cnt_buf[0], &dep_buf[0], out)
         pw[fi] = out[0]
+        ku[fi] = <cnp.int64_t>out[3]
         if out[0] > best_sr:
             best_sr = out[0]
             best_t0 = out[1]
@@ -165,4 +173,4 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
             for bb in range(n_bands):
                 bd[bb] = dep_buf[bb]
 
-    return power, best_freq, best_t0, best_dur, best_depths, best_sr
+    return power, best_freq, best_t0, best_dur, best_depths, best_sr, k_used

@@ -29,6 +29,17 @@ Two algorithmic variants are provided:
 Both report `power = Δχ²/χ²_flat` — the fraction of variance explained by the best
 box, in `[0, 1]`.
 
+### Interpreting `power`
+
+`power` is a fractional variance, not a significance. In a multiband search, a band
+only contributes to a trial window if it has data both inside and outside the box;
+under pure noise each contributing band adds ~1 to `Δχ²`, so the noise floor grows
+with the number of contributing bands `k`. Multiband CPU results report `k` per
+frequency in `BLSResult.n_bands_used` — compare `power` across frequencies (or
+objects) with care when `k` varies. Band weights assume the quoted `dy` are
+correctly scaled; check `BLSResult.band_chi2_red` (per-band flat-model χ²/dof) and
+use `rescale_errors=True` if bands are mis-scaled relative to each other.
+
 ## Implementations
 
 | Backend | Functions | Requirement |
@@ -78,6 +89,15 @@ bands = {
 Bands may have different numbers of observations; the arrays do not need to be the
 same length across bands.
 
+All entry points validate their input and raise `ValueError` (naming the band) for
+non-finite values, `dy <= 0`, `dy` so extreme that `1/dy²` over/underflows, unequal
+lengths, or empty arrays — remove bad points (e.g. with `np.isfinite`) before
+searching. Values so large that the mean-subtracted signal or its χ² overflows are
+rejected the same way. Frequencies must be finite and positive, `0 < q_min ≤ q_max < 1`,
+`min_points` / `nbins` must be positive integers, and `nbins ≤ 100 000`.
+`max|t| · max(frequency)` must stay below 1e15 cycles (subtract a reference epoch
+from `t` if needed).
+
 ## Quick start
 
 ### CPU (Cython)
@@ -118,11 +138,15 @@ if gpu_available():
 
 | Function | Backend | Purpose |
 |---|---|---|
-| `multiband_sparse_bls(bands, freqs, q_max, min_points)` | Cython | unbinned multiband BLS |
-| `multiband_eebls(bands, freqs, nbins, q_min, q_max, min_points)` | Cython | binned multiband BLS |
+| `multiband_sparse_bls(bands, freqs, q_max, min_points, rescale_errors)` | Cython | unbinned multiband BLS |
+| `multiband_eebls(bands, freqs, nbins, q_min, q_max, min_points, rescale_errors)` | Cython | binned multiband BLS |
 | `multiband_eebls_gpu(bands, freqs, nbins, ...)` | CUDA | binned multiband BLS, GPU |
 | `multiband_eebls_gpu_fast(bands, freqs, nbins, ...)` | CUDA | float32 + warp-shuffle variant |
 | `multiband_sparse_bls_reference(...)`, `multiband_eebls_reference(...)` | Python | reference oracle |
+
+The sparse (unbinned) functions have no `q_min`: `min_points` is the only guard
+against ultra-narrow boxes. Their default `q_max` is 0.15, versus 0.10 for the
+binned functions.
 
 ### Single-band
 
@@ -157,9 +181,11 @@ All entry points return an `BLSResult` dataclass:
 | `best_period` | `float` | period of the highest peak |
 | `best_t0` | `float` | mid-transit epoch at the best period |
 | `best_duration` | `float` | transit duration at the best period |
-| `best_depth` | `float` or `ndarray` | depth (single-band) or per-band depths array (multiband) |
+| `best_depth` | `float` or `ndarray` | depth (single-band) or per-band depths array (multiband); NaN for a band not measured at the best solution |
 | `best_power` | `float` | peak power value |
 | `bands` | `tuple[str, ...]` or `None` | band labels for multiband results |
+| `n_bands_used` | `ndarray[int64]` or `None` | multiband CPU/reference only: bands contributing to each frequency's best window (0 = no window) |
+| `band_chi2_red` | `ndarray` or `None` | multiband only: per-band flat-model χ²/dof of the input `dy` |
 
 ## GPU backend
 
@@ -175,14 +201,18 @@ log-spaced subset of transit widths is evaluated, and the phase fold runs in
 float-float (two-float32) arithmetic — several times faster than float64 on
 consumer GPUs at ~1e-10 phase error. The `dlogq` parameter (default 0.3)
 controls the log-spacing of transit-width samples; smaller values give denser
-coverage at higher compute cost. In the fast variants `min_points` is enforced
-as a weighted fraction of the total statistical weight rather than an exact
-in-transit count (identical for homoscedastic uncertainties). We thank
+coverage at higher compute cost. `min_points` is an exact global in-transit point
+count, with the same semantics as `eebls` / `multiband_eebls` and the exact GPU
+kernels. Because bins are float32, low-power (sub-peak) periodogram values are less
+accurate than the exact kernels'; the best period's parameters are recomputed
+exactly. We thank
 `cuvarbase` by John Hoffman for the tricks that inspired the fast kernels.
 
 > **Note:** all binned entry points (Cython, GPU, and the pure-Python
 > references) accept `nbins=None` to auto-select the bin count via
-> `auto_nbins(q_min)`.
+> `auto_nbins(q_min) = clip(round(5 / q_min), 50, 500)`. Below `q_min = 0.01`
+> the 500-bin cap gives fewer than 5 bins across the narrowest transit; this
+> emits a `UserWarning` — pass an explicit `nbins` to override.
 
 `gpu_available()` returns `True` if a usable CUDA GPU is detected.
 

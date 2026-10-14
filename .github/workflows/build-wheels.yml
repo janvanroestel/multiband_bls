@@ -47,6 +47,26 @@ jobs:
       - name: Build sdist
         run: pipx run build --sdist
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The generated .c files are not tracked, so the sdist must carry every
+      # .pyx and build from them. Build a wheel from the tarball itself (not the
+      # checkout) and import it from outside the source tree.
+      - name: Build and smoke-test a wheel from the sdist
+        run: |
+          tar tzf dist/*.tar.gz > sdist-files.txt
+          for m in _sbls _msbls _eebls _meebls; do
+            grep -q "src/multiband_bls/$m.pyx$" sdist-files.txt || { echo "missing $m.pyx"; exit 1; }
+          done
+          if grep -q '\.c$' sdist-files.txt; then echo "sdist contains generated .c"; exit 1; fi
+          python -m pip install --upgrade pip
+          python -m pip wheel dist/*.tar.gz --no-deps -w sdist-wheel/
+          python -m pip install sdist-wheel/*.whl
+          cd "$RUNNER_TEMP"
+          python -c "import multiband_bls as m, numpy as np; t = np.linspace(0, 10, 200); r = m.sparse_bls(t, np.sin(t), np.ones(200), np.linspace(0.5, 2, 50)); print(r.best_period)"
+
       - name: Upload sdist as artifact
         uses: actions/upload-artifact@v4
         with:

@@ -4,8 +4,9 @@ CLAUDE.md
 *.so
 *.pyd
 
-# Generated C from Cython (keep intentionally? leave tracked for --no-build-isolation)
-# *.c  ← intentionally NOT ignored; the four .c files are kept in-tree
+# Generated C from Cython: setup.py always cythonizes the .pyx sources
+# (Cython is a build requirement), so the .c files are pure build artifacts.
+src/multiband_bls/*.c
 
 # Python packaging
 *.egg-info/

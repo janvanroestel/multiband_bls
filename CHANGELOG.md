@@ -10,3 +10,32 @@ Initial release.
 - Fast GPU variants using prefix-sum phase bins, log-spaced transit widths, and a float-float phase fold (`eebls_gpu_fast`, `multiband_eebls_gpu_fast`)
 - Frequency grid builder (`build_frequency_grid`) with period and frequency interfaces
 - Pure-Python reference implementations for testing and verification
+
+### Robustness and diagnostics (pre-release review, 2026-10-14)
+
+- **Input validation** in every entry point: non-finite values, `dy <= 0`,
+  over/underflowing `1/dy²`, unequal lengths, empty arrays/bands, non-positive
+  frequencies, `q_min`/`q_max` outside `0 < q_min ≤ q_max < 1`, and non-integer
+  or `< 1` `min_points`/`nbins` now raise `ValueError` (naming the band) instead
+  of silently returning an all-NaN periodogram or truncating. Also rejected:
+  `y` large enough to overflow the mean-subtracted signal or its χ²,
+  `max|t|·max(f) > 1e15` cycles (phase overflow), and `nbins > 100 000`.
+- `auto_nbins` raises on `q_min <= 0` and warns when the 500-bin cap leaves fewer
+  than 5 bins across the narrowest transit (`q_min < 0.01`).
+- Multiband `best_depth` is NaN (was 0) for a band with no in-transit or no
+  out-of-transit data at the best solution.
+- New `BLSResult.n_bands_used` (multiband CPU/reference): number of bands
+  contributing at each frequency's best window — the noise floor of `power`
+  grows with it.
+- New `BLSResult.band_chi2_red` (multiband): per-band flat-model χ²/dof of the
+  input uncertainties, and an opt-in `rescale_errors=True` on all multiband entry
+  points that rescales each band's `dy` to χ²/dof = 1.
+- **Fast GPU kernels use an exact point count:** `eebls_gpu_fast` /
+  `multiband_eebls_gpu_fast` now enforce `min_points` as an exact global
+  in-transit count (plus the per-band ≥1-point rule) instead of a
+  weighted-fraction threshold that was biased for heteroscedastic `dy`. Costs
+  ~1.2–1.4× in speed for single-band at larger N; fast-kernel periodograms on
+  heteroscedastic data change.
+- Generated Cython `.c` files are no longer tracked or shipped in the sdist;
+  builds always cythonize the `.pyx` sources. CI builds and smoke-tests a wheel
+  from the sdist.
