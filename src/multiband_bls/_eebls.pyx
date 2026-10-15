@@ -74,7 +74,8 @@ cdef void _eebls_period_trap(const double* t, const double* wx, const double* w,
     For ``tau > 0`` uses a non-incremental triple loop with trapezoid weights.
     """
     cdef Py_ssize_t i
-    cdef int j, jj, ib, i1, width, cnt, k
+    cdef int j, jj, ib, i1, width, k
+    cdef cnp.int64_t cnt  # point counts: 64-bit, like the count buffers
     cdef double ph, s, r, denom, sr, phi_mid, fk, A, B, C
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0, best_depth = 0.0
     # prefix-sum variables (used only for tau > 0 path)

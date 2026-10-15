@@ -439,6 +439,9 @@ def build_frequency_grid(
     f_max = _positive("f_max", f_max)
     if f_min >= f_max:
         raise ValueError(f"f_min ({f_min}) must be < f_max ({f_max}).")
+    # validated even when df is given explicitly, so bad values never pass silently
+    q_min = _positive("q_min", q_min)
+    oversample = _positive("oversample", oversample)
 
     t = np.asarray(t, dtype=float)
     if t.size == 0 or not np.all(np.isfinite(t)):
@@ -448,7 +451,7 @@ def build_frequency_grid(
         raise ValueError("Time array spans zero baseline.")
 
     if df is None:
-        df = _positive("q_min", q_min) / (_positive("oversample", oversample) * baseline)
+        df = q_min / (oversample * baseline)
     else:
         df = _positive("df", df)
     return np.arange(f_min, f_max, df)

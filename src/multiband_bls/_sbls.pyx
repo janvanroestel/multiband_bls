@@ -21,7 +21,7 @@ cdef void _single_period(const double* phi, const double* wx, const double* w,
     (wrap-around) run grown from ``i1``.
     """
     cdef Py_ssize_t i1, k, i2, i1m, i2p
-    cdef int cnt
+    cdef cnp.int64_t cnt  # point counts: 64-bit, like the count buffers
     cdef double s, r, frac, phi_ing, phi_eg, denom, sr
     cdef double p_i1, p_i1m, p_i2, p_i2p, phi_mid
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0, best_depth = 0.0

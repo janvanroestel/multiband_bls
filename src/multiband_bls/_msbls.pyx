@@ -32,7 +32,8 @@ cdef void _multiband_period(const double* phi, const double* wx,
     ``n_bands`` (contents are overwritten).
     """
     cdef Py_ssize_t i1, k, i2, i1m, i2p
-    cdef int bb, total
+    cdef int bb
+    cdef cnp.int64_t total  # point counts: 64-bit, like the count buffers
     cdef cnp.int64_t b
     cdef double frac, phi_ing, phi_eg, denom, sr2
     cdef double p_i1, p_i1m, p_i2, p_i2p, phi_mid

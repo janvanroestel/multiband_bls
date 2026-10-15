@@ -37,7 +37,8 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
     depths`` are length-``n_bands`` scratch buffers (all overwritten).
     """
     cdef Py_ssize_t i
-    cdef int j, jj, ib, i1, width, bb, total
+    cdef int j, jj, ib, i1, width, bb
+    cdef cnp.int64_t total  # point counts: 64-bit, like the count buffers
     cdef cnp.int64_t b
     cdef double ph, denom, sr2, phi_mid
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0
@@ -76,7 +77,7 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
                 s[bb] += ybin[bb * nb + jj]
                 r[bb] += rbin[bb * nb + jj]
                 cnt[bb] += cbin[bb * nb + jj]
-                total += <int>cbin[bb * nb + jj]
+                total += cbin[bb * nb + jj]
             width += 1
             if width < kmi:
                 continue

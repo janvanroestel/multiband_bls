@@ -1063,6 +1063,8 @@ def test_sparse_best_box_matches_weighted_least_squares(lightcurve, freqs):
     {"f_min": 1.0, "f_max": 2.0, "df": 0.0},
     {"f_min": 1.0, "f_max": 2.0, "q_min": -0.01},
     {"f_min": 1.0, "f_max": 2.0, "oversample": 0.0},
+    {"f_min": 1.0, "f_max": 2.0, "df": 1e-3, "q_min": np.nan},   # explicit df too
+    {"f_min": 1.0, "f_max": 2.0, "df": 1e-3, "oversample": 0.0},
 ])
 def test_build_frequency_grid_rejects_bad_bounds(kwargs):
     t = np.linspace(0.0, 100.0, 50)
