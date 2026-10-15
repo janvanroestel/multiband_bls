@@ -858,3 +858,218 @@ def test_gpu_fast_rejects_too_many_points(monkeypatch, lightcurve, freqs):
         eebls_gpu_fast(*bands["r"], freqs)
     with pytest.raises(ValueError, match="fewer than 10 points"):
         multiband_eebls_gpu_fast(bands, freqs)
+
+
+# --------------------------------------------------------------------------- #
+# Numerical robustness (pre-release review): constants, missing baseline, ties #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(("fn", "binned"), _SINGLE_ENTRIES)
+def test_constant_nonzero_signal_gives_zero_power(fn, binned):
+    """A constant magnitude-20 curve (not 0) has no signal: power must be exactly 0.
+
+    sum(w_hat * y) = 20 * (1 +- eps) used to leave a ~1e-15 residue that produced
+    power ~0.3-0.5 (sparse) or ~9e15 (binned, all-points window).
+    """
+    kw = {"nbins": 100} if binned else {}
+    t = np.linspace(0.0, 0.05, 10)                   # clustered: one window holds all
+    res = fn(t, np.full(10, 20.0), np.full(10, 0.03), np.array([1.0]), q_max=0.1, **kw)
+    assert np.all(res.power == 0.0)
+    t, _, dy = _small_lc()
+    res = fn(t, np.full_like(t, 20.0), dy, _VFREQS, **kw)
+    assert np.all(res.power == 0.0)
+
+
+@pytest.mark.parametrize(("fn", "binned"), _MULTI_ENTRIES)
+def test_multiband_constant_bands_give_zero_power(fn, binned):
+    (tg, _, dyg), (tr, _, dyr) = _small_lc(seed=1), _small_lc(seed=2)
+    bands = {"g": (tg, np.full_like(tg, 20.0), dyg), "r": (tr, np.full_like(tr, 19.0), dyr)}
+    assert np.all(fn(bands, _VFREQS).power == 0.0)
+
+
+@pytest.mark.parametrize(("fn", "binned"), _SINGLE_ENTRIES)
+def test_window_holding_every_point_is_rejected(fn, binned):
+    """All points in one short phase range: a window containing all of them has
+    no baseline, so it must not be scored (power stays a valid fraction)."""
+    rng = np.random.default_rng(3)
+    t = np.linspace(0.0, 0.05, 10)
+    y = rng.normal(20.0, 0.03, 10)
+    kw = {"nbins": 100} if binned else {}
+    res = fn(t, y, np.full(10, 0.03), np.array([1.0]), q_max=0.1, **kw)
+    assert 0.0 <= res.best_power <= 1.0 + 1e-9
+    assert np.isfinite(res.best_depth)
+
+
+def _clustered_u_bands():
+    """'g' samples the whole phase with an eclipse at phase 0.5; every 'u' point
+    sits inside the eclipse, so u has no out-of-eclipse baseline."""
+    rng = np.random.default_rng(8)
+    tg = np.sort(rng.uniform(0.0, 50.0, 200))
+    yg = 20.0 + 0.5 * (np.abs((tg % 1.0) - 0.5) < 0.03) + rng.normal(0, 0.01, 200)
+    tu = 10.0 + 0.5 + np.linspace(-0.01, 0.01, 6)    # all within the eclipse
+    yu = 21.0 + rng.normal(0, 0.01, 6)
+    return {"g": (tg, yg, np.full(200, 0.01)), "u": (tu, yu, np.full(6, 0.01))}
+
+
+def test_band_without_baseline_is_not_measured():
+    """A band whose every point is in the best window gets NaN depth and does not
+    count towards n_bands_used (r(1-r) > 0 alone fails to rounding there)."""
+    bands = _clustered_u_bands()
+    freqs = np.array([1.0])
+    for fn, kw in ((multiband_sparse_bls, {}),
+                   (multiband_sparse_bls_reference, {}),
+                   (multiband_eebls, {"nbins": 200}),
+                   (multiband_eebls_reference, {"nbins": 200})):
+        res = fn(bands, freqs, q_max=0.1, **kw)
+        depths = dict(zip(res.bands, res.best_depth))
+        assert np.isnan(depths["u"]), fn.__name__
+        assert depths["g"] == pytest.approx(0.5, abs=0.05), fn.__name__
+        assert res.n_bands_used[0] == 1, fn.__name__
+        assert 0.0 <= res.best_power <= 1.0 + 1e-9, fn.__name__
+
+
+@_GPU
+def test_gpu_band_without_baseline_matches_cpu():
+    bands = _clustered_u_bands()
+    freqs = np.linspace(0.9, 1.1, 41)
+    cpu = multiband_eebls(bands, freqs, nbins=200, q_max=0.1)
+    gpu = multiband_eebls_gpu(bands, freqs, nbins=200, q_max=0.1)
+    np.testing.assert_allclose(gpu.power, cpu.power, rtol=1e-6, atol=1e-9)
+    assert np.all(gpu.power <= 1.0 + 1e-9)
+    fast = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.1)
+    assert np.all(fast.power <= 1.0 + 1e-6)
+
+
+_TIED_T = np.array([0.0, 0.05, 0.05, 0.05, 0.1, 0.4, 0.6, 0.8])
+_TIED_Y = np.array([0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+
+
+@pytest.mark.parametrize("fn", [sparse_bls, sparse_bls_reference])
+def test_sparse_finds_eclipse_with_tied_phases(fn):
+    """Identical phases used to be read as a phase wrap (huge duration, early exit)."""
+    res = fn(_TIED_T, _TIED_Y, np.ones(8), np.array([1.0]), q_max=0.15)
+    assert res.best_power == pytest.approx(1.0)
+    assert res.best_depth == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("fn", [multiband_sparse_bls, multiband_sparse_bls_reference])
+def test_multiband_sparse_finds_eclipse_with_tied_phases(fn):
+    res = fn({"a": (_TIED_T, _TIED_Y, np.ones(8))}, np.array([1.0]), q_max=0.15)
+    assert res.best_power == pytest.approx(1.0)
+
+
+def test_simultaneous_bands_are_never_split():
+    """Bands observed at identical times: points at one phase must share in/out
+    membership, so the result equals that of the tie-free reference oracle."""
+    rng = np.random.default_rng(12)
+    t = np.sort(rng.uniform(0.0, 20.0, 60))
+    ecl = np.abs((t / 0.7 % 1.0) - 0.3) < 0.04
+    bands = {b: (t, 20.0 + d * ecl + rng.normal(0, 0.02, 60), np.full(60, 0.02))
+             for b, d in (("g", 0.4), ("r", 0.2))}
+    freqs = np.array([1 / 0.7])
+    mc = multiband_sparse_bls(bands, freqs, q_max=0.15)
+    mr = multiband_sparse_bls_reference(bands, freqs, q_max=0.15)
+    np.testing.assert_allclose(mc.power, mr.power, rtol=0, atol=1e-12)
+    assert mc.best_power > 0.8
+    # the best box contains whole tie groups: same membership in both bands
+    phase = ((t - mc.best_t0) * freqs[0] + 0.5) % 1.0 - 0.5
+    inside = np.abs(phase) < 0.5 * mc.best_duration * freqs[0]
+    assert inside.sum() >= 3
+
+
+# --------------------------------------------------------------------------- #
+# Invariances and an independent weighted-least-squares oracle                 #
+# --------------------------------------------------------------------------- #
+def test_permutation_invariance(lightcurve, freqs):
+    bands, _ = lightcurve
+    rng = np.random.default_rng(5)
+    shuffled = {}
+    for b in reversed(list(bands)):                  # band order reversed too
+        t, y, dy = bands[b]
+        o = rng.permutation(len(t))
+        shuffled[b] = (t[o], y[o], dy[o])
+    for fn, kw in ((multiband_sparse_bls, {}), (multiband_eebls, {"nbins": 200})):
+        a = fn(bands, freqs, q_max=0.12, **kw)
+        b = fn(shuffled, freqs, q_max=0.12, **kw)
+        np.testing.assert_allclose(a.power, b.power, rtol=1e-9, atol=1e-12)
+    t, y, dy = coadd_bands(bands)
+    o = rng.permutation(len(t))
+    for fn in (sparse_bls, eebls):
+        np.testing.assert_allclose(fn(t, y, dy, freqs).power,
+                                   fn(t[o], y[o], dy[o], freqs).power,
+                                   rtol=1e-9, atol=1e-12)
+
+
+def test_offset_and_scale_invariance(lightcurve, freqs):
+    """power depends neither on per-band baselines nor on a common scale of (y, dy)."""
+    bands, _ = lightcurve
+    shifted = {b: (t, y + 7.0 * i, dy) for i, (b, (t, y, dy)) in enumerate(bands.items())}
+    scaled = {b: (t, 3.0 * y, 3.0 * dy) for b, (t, y, dy) in bands.items()}
+    for fn, kw in ((multiband_sparse_bls, {}), (multiband_eebls, {"nbins": 200})):
+        ref = fn(bands, freqs, q_max=0.12, **kw).power
+        np.testing.assert_allclose(fn(shifted, freqs, q_max=0.12, **kw).power, ref,
+                                   rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(fn(scaled, freqs, q_max=0.12, **kw).power, ref,
+                                   rtol=1e-9, atol=1e-12)
+
+
+def _wls_box_power(bands, period, t0, duration):
+    """Independent oracle: fit baseline_b + depth_b * in_box by explicit weighted
+    least squares per band and return (Delta chi2 / chi2_flat, depths)."""
+    d_chi2 = chi2_flat = 0.0
+    depths = []
+    for t, y, dy in bands.values():
+        phase = ((t - t0) / period + 0.5) % 1.0 - 0.5
+        inside = (np.abs(phase) < 0.5 * duration / period).astype(float)
+        w = 1.0 / dy ** 2
+        sw = np.sqrt(w)
+        flat = np.sum(w * (y - np.average(y, weights=w)) ** 2)
+        if 0 < inside.sum() < len(t):
+            design = np.column_stack([np.ones_like(t), inside]) * sw[:, None]
+            coef, *_ = np.linalg.lstsq(design, y * sw, rcond=None)
+            resid = np.sum(w * (y - coef[0] - coef[1] * inside) ** 2)
+            depths.append(coef[1])
+        else:
+            resid = flat
+            depths.append(np.nan)
+        d_chi2 += flat - resid
+        chi2_flat += flat
+    return d_chi2 / chi2_flat, np.array(depths)
+
+
+def test_sparse_best_box_matches_weighted_least_squares(lightcurve, freqs):
+    """The reported best power and depths equal an explicit WLS box fit at the
+    reported (period, t0, duration): validates the objective, not just agreement
+    between implementations that share code."""
+    bands, _ = lightcurve
+    mc = multiband_sparse_bls(bands, freqs, q_max=0.12)
+    power, depths = _wls_box_power(bands, mc.best_period, mc.best_t0, mc.best_duration)
+    assert mc.best_power == pytest.approx(power, rel=1e-9)
+    np.testing.assert_allclose(mc.best_depth, depths, rtol=1e-9)
+
+    t, y, dy = bands["r"]
+    sc = sparse_bls(t, y, dy, freqs, q_max=0.12)
+    power, depths = _wls_box_power({"r": (t, y, dy)}, sc.best_period, sc.best_t0,
+                                   sc.best_duration)
+    assert sc.best_power == pytest.approx(power, rel=1e-9)
+    assert sc.best_depth == pytest.approx(depths[0], rel=1e-9)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"f_min": -1.0, "f_max": 2.0},
+    {"f_min": 1.0, "f_max": np.inf},
+    {"p_min": -0.5, "p_max": 1.0},
+    {"p_min": 0.0, "p_max": 1.0},
+    {"f_min": 1.0, "f_max": 2.0, "df": -1e-3},
+    {"f_min": 1.0, "f_max": 2.0, "df": 0.0},
+    {"f_min": 1.0, "f_max": 2.0, "q_min": -0.01},
+    {"f_min": 1.0, "f_max": 2.0, "oversample": 0.0},
+])
+def test_build_frequency_grid_rejects_bad_bounds(kwargs):
+    t = np.linspace(0.0, 100.0, 50)
+    with pytest.raises(ValueError):
+        build_frequency_grid(t, **kwargs)
+
+
+def test_build_frequency_grid_rejects_non_finite_times():
+    with pytest.raises(ValueError, match="finite"):
+        build_frequency_grid(np.array([0.0, np.nan, 10.0]), f_min=1.0, f_max=2.0)

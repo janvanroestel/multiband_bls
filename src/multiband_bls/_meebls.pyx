@@ -22,11 +22,11 @@ cnp.import_array()
 
 
 cdef void _meebls_period(const double* t, const double* wx, const double* w,
-                         const long* band, Py_ssize_t n, int n_bands, int nb,
+                         const cnp.int64_t* band, Py_ssize_t n, int n_bands, int nb,
                          double period, int kmi, int kma, int min_points,
-                         const double* band_w,
-                         double* ybin, double* rbin, long* cbin,
-                         double* s, double* r, long* cnt,
+                         const double* band_w, const cnp.int64_t* band_n,
+                         double* ybin, double* rbin, cnp.int64_t* cbin,
+                         double* s, double* r, cnp.int64_t* cnt,
                          double* depths, double* out) noexcept nogil:
     """Fill ``out = [SR, t0, duration, k]`` and ``depths[n_bands]`` for one period.
 
@@ -38,7 +38,7 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
     """
     cdef Py_ssize_t i
     cdef int j, jj, ib, i1, width, bb, total
-    cdef long b
+    cdef cnp.int64_t b
     cdef double ph, denom, sr2, phi_mid
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0
     cdef int kk, best_k = 0
@@ -85,7 +85,10 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
             sr2 = 0.0
             kk = 0
             for bb in range(n_bands):
-                if cnt[bb] < 1:
+                # a band's depth is identifiable only with points both in and
+                # out of the window (r(1-r) > 0 alone fails to rounding when
+                # every point of the band is in the window)
+                if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
                 if denom <= 0.0:
@@ -103,7 +106,7 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
                 best_t0 = phi_mid * period
                 for bb in range(n_bands):
                     denom = r[bb] * (1.0 - r[bb])
-                    if cnt[bb] >= 1 and denom > 0.0:
+                    if cnt[bb] >= 1 and cnt[bb] < band_n[bb] and denom > 0.0:
                         depths[bb] = s[bb] / denom
                     else:
                         depths[bb] = NAN
@@ -115,7 +118,7 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
 
 
 def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
-                long[::1] band, int n_bands, double[::1] freqs, int nb,
+                cnp.int64_t[::1] band, int n_bands, double[::1] freqs, int nb,
                 double qmin, double qmax, int min_points, double[::1] band_w):
     """Scan a frequency grid for the binned multiband search.
 
@@ -143,10 +146,11 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
 
     cdef double[::1] ybin = np.empty(n_bands * nb, dtype=np.float64)
     cdef double[::1] rbin = np.empty(n_bands * nb, dtype=np.float64)
-    cdef long[::1] cbin = np.empty(n_bands * nb, dtype=np.int64)
+    cdef cnp.int64_t[::1] cbin = np.empty(n_bands * nb, dtype=np.int64)
     cdef double[::1] s_buf = np.empty(n_bands, dtype=np.float64)
     cdef double[::1] r_buf = np.empty(n_bands, dtype=np.float64)
-    cdef long[::1] cnt_buf = np.empty(n_bands, dtype=np.int64)
+    cdef cnp.int64_t[::1] cnt_buf = np.empty(n_bands, dtype=np.int64)
+    cdef cnp.int64_t[::1] band_n = np.bincount(np.asarray(band), minlength=n_bands).astype(np.int64)
     cdef double[::1] dep_buf = np.empty(n_bands, dtype=np.float64)
 
     cdef double out[4]
@@ -160,7 +164,7 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
         period = 1.0 / f
         with nogil:
             _meebls_period(&t[0], &wx[0], &w_hat[0], &band[0], n, n_bands, nb,
-                           period, kmi, kma, min_points, &band_w[0],
+                           period, kmi, kma, min_points, &band_w[0], &band_n[0],
                            &ybin[0], &rbin[0], &cbin[0], &s_buf[0], &r_buf[0],
                            &cnt_buf[0], &dep_buf[0], out)
         pw[fi] = out[0]

@@ -36,6 +36,19 @@ Initial release.
   weighted-fraction threshold that was biased for heteroscedastic `dy`. Costs
   ~1.2–1.4× in speed for single-band at larger N; fast-kernel periodograms on
   heteroscedastic data change.
+- **Numerical fixes:** an exactly constant signal now gives zero power (the weighted
+  mean left a ~1e-15 residue that produced spurious power, up to ~1e16 for a box
+  holding every point); a band — or, single-band, the light curve — only
+  contributes to a box with points both inside and outside it; the sparse
+  searches no longer mistake tied phases for a phase wrap (a perfect eclipse
+  with simultaneous points could return zero power) and never split points of
+  identical phase between in- and out-of-eclipse.
+- `build_frequency_grid` rejects non-positive or non-finite bounds, `df`,
+  `oversample`, `q_min` and non-finite times.
+- Cython cores use 64-bit integer buffers explicitly (portable to platforms
+  where C `long` is 32-bit).
+- Release workflow: cp39 wheels, wheel tests no longer need `pytest-cov`, smoke
+  tests require the compiled cores, explicit `contents: write` permission.
 - Generated Cython `.c` files are no longer tracked or shipped in the sdist;
   builds always cythonize the `.pyx` sources. CI builds and smoke-tests a wheel
   from the sdist.

@@ -37,24 +37,28 @@ class BLSResult:
         no in-transit (or no out-of-transit) data at the best solution, i.e. a
         band whose depth was not measured.
     best_power:
-        ``power`` at the best solution.
+        ``power`` at the best solution. 0 when no box passed the cuts at any
+        frequency; the ``best_*`` fields then refer to the first trial
+        frequency and should not be used.
     bands:
         Band labels for a multiband result, else ``None``.
     n_bands_used:
         Multiband CPU/reference results only (else ``None``): for each trial
         frequency, the number of bands ``k`` contributing to that frequency's
-        best window, or 0 if no window was selected there. Under pure noise
-        each contributing band adds ~1 to ``Delta chi^2``, so the noise floor
-        of ``power`` grows with ``k``: values at frequencies with different
-        ``k`` are not directly comparable.
+        best window, or 0 if no window was selected there. For a fixed window
+        and correct uncertainties each contributing band adds ~1 to
+        ``Delta chi^2`` under pure noise, so the noise level of ``power`` grows
+        with ``k`` and values at frequencies with different ``k`` are not
+        directly comparable. (``power`` is maximised over windows, so this does
+        not give a significance.)
     band_chi2_red:
         Multiband results only (else ``None``): per-band flat-model reduced
         chi^2, ``sum_i (x_tilde/sigma)^2 / (N_b - 1)``, from the *input* ``dy``
         (NaN for a single-point band). Values far from 1, or very different
-        between bands, mean the reported uncertainties are mis-scaled and the
+        between bands, can mean the reported uncertainties are mis-scaled and the
         matched-filter band weights are off; see the ``rescale_errors`` option.
-        The flat-model chi^2 includes any eclipse signal, so deep-eclipse bands
-        read slightly high.
+        But the flat-model chi^2 includes any real variability, so bands with
+        deep eclipses can read far above 1 even with correct uncertainties.
     """
 
     frequency: Array

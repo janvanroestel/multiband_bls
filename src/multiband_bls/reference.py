@@ -225,11 +225,17 @@ def preprocess(y: Array, dy: Array) -> tuple[Array, Array, float]:
     dy :
         1-sigma uncertainties, 1-D float array, same length as ``y``.
     """
+    y = np.asarray(y, dtype=float)
     w = 1.0 / np.asarray(dy, dtype=float) ** 2
     W = w.sum()
     w_hat = w / W
-    mu = float(np.sum(w_hat * np.asarray(y, dtype=float)))
-    x_tilde = np.asarray(y, dtype=float) - mu
+    if y.size and np.all(y == y[0]):
+        # Exactly constant signal: sum(w_hat * y) = y[0] * (1 +- eps) would leave
+        # a ~1e-15 residue in x_tilde and hence a spurious, noise-driven power.
+        mu = float(y[0])
+    else:
+        mu = float(np.sum(w_hat * y))
+    x_tilde = y - mu
     return w_hat, x_tilde, mu
 
 
@@ -407,30 +413,44 @@ def build_frequency_grid(
     Raises
     ------
     ValueError
-        If conflicting bounds are given, if ``f_min >= f_max``, or if the time
-        array spans zero baseline.
+        If conflicting bounds are given, if a bound, ``df``, ``oversample`` or
+        ``q_min`` is non-finite or non-positive, if ``f_min >= f_max``, or if the
+        time array is not finite or spans zero baseline.
     """
+    def _positive(name: str, value: float) -> float:
+        v = float(value)
+        if not (np.isfinite(v) and v > 0.0):
+            raise ValueError(f"{name} must be finite and > 0, got {value!r}.")
+        return v
+
     # Convert period bounds → frequency bounds (note the inversion).
     period_given = p_min is not None or p_max is not None
     freq_given = f_min is not None or f_max is not None
     if period_given and freq_given:
         raise ValueError("Provide either (p_min, p_max) or (f_min, f_max), not both.")
     if p_min is not None:
-        f_max = 1.0 / p_min
+        f_max = 1.0 / _positive("p_min", p_min)
     if p_max is not None:
-        f_min = 1.0 / p_max
+        f_min = 1.0 / _positive("p_max", p_max)
 
     if f_min is None or f_max is None:
         raise ValueError("Specify either (f_min, f_max) or (p_min, p_max).")
+    f_min = _positive("f_min", f_min)
+    f_max = _positive("f_max", f_max)
     if f_min >= f_max:
         raise ValueError(f"f_min ({f_min}) must be < f_max ({f_max}).")
 
+    t = np.asarray(t, dtype=float)
+    if t.size == 0 or not np.all(np.isfinite(t)):
+        raise ValueError("t must be a non-empty array of finite times.")
     baseline = float(np.max(t) - np.min(t))
     if baseline <= 0.0:
         raise ValueError("Time array spans zero baseline.")
 
     if df is None:
-        df = float(q_min) / (oversample * baseline)
+        df = _positive("q_min", q_min) / (_positive("oversample", oversample) * baseline)
+    else:
+        df = _positive("df", df)
     return np.arange(f_min, f_max, df)
 
 
@@ -450,12 +470,14 @@ def _transit_fraction(
     p_i1, p_i1m = phi[i1], phi[i1m]
     p_i2, p_i2p = phi[i2], phi[i2p]
 
-    if p_i1m < p_i1:  # neighbour does not wrap past phase 0
+    # Wrap-around is decided by index (phi is sorted), not by comparing values,
+    # so tied phases cannot be mistaken for a wrap.
+    if i1 > 0:  # neighbour does not wrap past phase 0
         phi_ing = 0.5 * (p_i1m + p_i1)
     else:
         phi_ing = 0.5 * (p_i1m + p_i1) - 0.5
 
-    if p_i2 < p_i2p:  # neighbour does not wrap past phase 1
+    if i2p != 0:  # neighbour does not wrap past phase 1
         phi_eg = 0.5 * (p_i2 + p_i2p)
     else:
         phi_eg = 0.5 * (p_i2 + p_i2p) + 0.5
@@ -488,6 +510,8 @@ def _single_period(
     best_depth = 0.0
 
     for i1 in range(n):
+        if phi_sorted[(i1 - 1) % n] == phi_sorted[i1]:
+            continue  # ingress edge would split identical phases
         s = 0.0
         r = 0.0
         cnt = 0
@@ -499,6 +523,8 @@ def _single_period(
             frac, phi_ing = _transit_fraction(phi_sorted, i1, i2, n)
             if frac >= q_max:
                 break
+            if phi_sorted[(i2 + 1) % n] == phi_sorted[i2]:
+                continue  # egress edge would split identical phases
             if cnt < min_points:
                 continue
             denom = r * (1.0 - r)
@@ -588,6 +614,7 @@ def _multiband_period(
     q_max: float,
     min_points: int,
     band_w: Array,
+    band_n: npt.NDArray[np.int64],
 ) -> tuple[float, float, float, Array, int]:
     """Best combined ``(SR, t0, duration, depths[n_bands], k)`` for one period.
 
@@ -612,6 +639,8 @@ def _multiband_period(
     best_k = 0
 
     for i1 in range(n):
+        if phi_sorted[(i1 - 1) % n] == phi_sorted[i1]:
+            continue  # ingress edge would split identical phases
         s = np.zeros(n_bands)
         r = np.zeros(n_bands)
         cnt = np.zeros(n_bands, dtype=np.int64)
@@ -626,13 +655,16 @@ def _multiband_period(
             frac, phi_ing = _transit_fraction(phi_sorted, i1, i2, n)
             if frac >= q_max:
                 break
+            if phi_sorted[(i2 + 1) % n] == phi_sorted[i2]:
+                continue  # egress edge would split identical phases
             if total < min_points:
                 continue
             sr2 = 0.0
             depths = np.full(n_bands, np.nan)
             kk = 0
             for bb in range(n_bands):
-                if cnt[bb] < 1:
+                # identifiable only with points both in and out of the window
+                if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
                 if denom <= 0.0:
@@ -684,6 +716,7 @@ def multiband_sparse_bls_reference(
     t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
     _check_phase_range(t_all, freqs)
     n_bands = len(labels)
+    band_n = np.bincount(band_all, minlength=n_bands).astype(np.int64)
 
     power = np.zeros(freqs.shape[0])
     k_used = np.zeros(freqs.shape[0], dtype=np.int64)
@@ -709,6 +742,7 @@ def multiband_sparse_bls_reference(
             q_max,
             min_points,
             band_w,
+            band_n,
         )
         power[idx] = sr
         k_used[idx] = k
@@ -743,6 +777,7 @@ def _meebls_period(
     kma: int,
     min_points: int,
     band_w: Array,
+    band_n: npt.NDArray[np.int64],
 ) -> tuple[float, float, float, Array, int]:
     """Best combined ``(SR, t0, duration, depths[n_bands], k)`` for one period.
 
@@ -788,7 +823,8 @@ def _meebls_period(
             depths = np.full(n_bands, np.nan)
             kk = 0
             for bb in range(n_bands):
-                if cnt[bb] < 1:
+                # identifiable only with points both in and out of the window
+                if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
                 if denom <= 0.0:
@@ -858,6 +894,7 @@ def multiband_eebls_reference(
     t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
     _check_phase_range(t_all, freqs)
     n_bands = len(labels)
+    band_n = np.bincount(band_all, minlength=n_bands).astype(np.int64)
 
     power = np.zeros(freqs.shape[0])
     k_used = np.zeros(freqs.shape[0], dtype=np.int64)
@@ -867,7 +904,7 @@ def multiband_eebls_reference(
         period = 1.0 / f
         sr, t0, dur, depths, k = _meebls_period(
             t_all, wx_all, w_all, band_all, n_bands, period, nbins, kmi, kma,
-            min_points, band_w,
+            min_points, band_w, band_n,
         )
         power[idx] = sr
         k_used[idx] = k
@@ -964,6 +1001,8 @@ def eebls_reference(
                     continue
                 if cnt < min_points:
                     continue
+                if cnt >= t.shape[0]:
+                    continue  # no out-of-transit point: depth not identifiable
                 denom = r * (1.0 - r)
                 if denom <= 0.0:
                     continue

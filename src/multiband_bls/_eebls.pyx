@@ -66,7 +66,7 @@ cdef inline double _trap_w(double phi, double tau) noexcept nogil:
 cdef void _eebls_period_trap(const double* t, const double* wx, const double* w,
                              Py_ssize_t n, double period, int nb,
                              int kmi, int kma, int min_bin_points, double tau,
-                             double* ybin, double* rbin, long* cbin,
+                             double* ybin, double* rbin, cnp.int64_t* cbin,
                              double* out) noexcept nogil:
     """Fill ``out = [SR, t0, duration, depth]`` for one trial period and shape.
 
@@ -83,14 +83,14 @@ cdef void _eebls_period_trap(const double* t, const double* wx, const double* w,
     cdef double* S0r = NULL
     cdef double* S1r = NULL
     cdef double* S2r = NULL
-    cdef long*   S0c = NULL
+    cdef cnp.int64_t*   S0c = NULL
     cdef int size2, k_in, k_eg, je, jf, jw
     cdef double m, c2, c2sq, i1d, wd, yv, rv
     cdef double A_in, A_flat, A_eg, C_in, C_flat, C_eg, B_in, B_flat, B_eg
     cdef double DS0y_in, DS1y_in, DS0y_flat, DS0y_eg, DS1y_eg
     cdef double DS0r_in, DS1r_in, DS2r_in, DS0r_flat, DS0r_eg, DS1r_eg, DS2r_eg
     cdef double ref_in, ref_eg
-    cdef long cnt_l
+    cdef cnp.int64_t cnt_l
 
     # --- binning ----------------------------------------------------------------
     for j in range(nb):
@@ -128,6 +128,8 @@ cdef void _eebls_period_trap(const double* t, const double* wx, const double* w,
                     continue
                 if cnt < min_bin_points:
                     continue
+                if cnt >= n:
+                    continue  # no out-of-transit point: depth not identifiable
                 denom = r * (1.0 - r)
                 if denom <= 0.0:
                     continue
@@ -149,7 +151,7 @@ cdef void _eebls_period_trap(const double* t, const double* wx, const double* w,
         S0r = <double*>malloc(size2 * sizeof(double))
         S1r = <double*>malloc(size2 * sizeof(double))
         S2r = <double*>malloc(size2 * sizeof(double))
-        S0c = <long*>malloc(size2 * sizeof(long))
+        S0c = <cnp.int64_t*>malloc(size2 * sizeof(cnp.int64_t))
         if (S0y == NULL or S1y == NULL or S0r == NULL or
                 S1r == NULL or S2r == NULL or S0c == NULL):
             free(S0y); free(S1y); free(S0r)
@@ -187,6 +189,8 @@ cdef void _eebls_period_trap(const double* t, const double* wx, const double* w,
                 cnt_l = S0c[jw] - S0c[i1]
                 if cnt_l < min_bin_points:
                     continue
+                if cnt_l >= n:
+                    continue  # no out-of-transit point: depth not identifiable
 
                 DS0y_in  = S0y[je] - S0y[i1]
                 DS1y_in  = S1y[je] - S1y[i1]
@@ -278,7 +282,7 @@ def eebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
     cdef double[::1] pw = power
     cdef double[::1] ybin = np.empty(nb, dtype=np.float64)
     cdef double[::1] rbin = np.empty(nb, dtype=np.float64)
-    cdef long[::1] cbin = np.empty(nb, dtype=np.int64)
+    cdef cnp.int64_t[::1] cbin = np.empty(nb, dtype=np.int64)
 
     cdef double out[4]
     cdef double tau, period, f

@@ -114,6 +114,7 @@ void eebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                 s += ybin[jj]; r += rbin[jj]; cnt += (int)cbin[jj];
                 if (ww < kmi) continue;
                 if (cnt < min_bin_points) continue;
+                if (cnt >= n) continue;  // no out-of-transit point: depth not identifiable
                 double denom = r * (1.0 - r);
                 if (denom <= 0.0) continue;
                 double sr2 = s * s / denom;
@@ -139,6 +140,7 @@ extern "C" __global__ __launch_bounds__(256)
 void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                    const double* __restrict__ w,
                    const int* __restrict__ band, const double* __restrict__ band_w,
+                   const int* __restrict__ band_n,
                    int n, int n_bands, int nf,
                    const double* __restrict__ freqs, int nb, int kmi, int kma,
                    int min_points, double* power) {
@@ -151,7 +153,8 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
     __shared__ double red[256];              // sized for _THREADS = 256
 
     double bw[8];                            // band weights cached in registers
-    for (int b = 0; b < n_bands; b++) bw[b] = __ldg(&band_w[b]);
+    int bn[8];                               // points per band
+    for (int b = 0; b < n_bands; b++) { bw[b] = __ldg(&band_w[b]); bn[b] = __ldg(&band_n[b]); }
 
     for (int f = blockIdx.x; f < nf; f += gridDim.x) {
         double freq = __ldg(&freqs[f]);
@@ -184,6 +187,8 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                 if (total < min_points) continue;
                 double T3 = 0.0;
                 for (int b = 0; b < n_bands; b++) {
+                    // identifiable only with points both in and out of the window
+                    if (cnt[b] < 1 || cnt[b] >= bn[b]) continue;
                     double denom = r[b] * (1.0 - r[b]);
                     if (denom <= 0.0) continue;
                     T3 += bw[b] * s[b] * s[b] / denom;
@@ -263,6 +268,7 @@ void eebls_fast_kernel(
     int lane = tid & 31;
     int warp = tid >> 5;
     float min_cnt = (float)min_points - 0.5f;  // integer counts: cnt >= min_points
+    float max_cnt = (float)n - 0.5f;           // cnt <= n - 1: keep an out-of-transit point
 
     for (int f = blockIdx.x; f < nf; f += gridDim.x) {
         double fd = __ldg(&freqs[f]);
@@ -314,13 +320,13 @@ void eebls_fast_kernel(
                 float sy, sr, sc;
                 if (j2 < nb) {
                     sc = cbin[j2] - cc0;
-                    if (sc < min_cnt) continue;
+                    if (sc < min_cnt || sc > max_cnt) continue;
                     sy = ybin[j2] - cy0;
                     sr = rbin[j2] - cr0;
                 } else {
                     j2 -= nb;
                     sc = (totc - cc0) + cbin[j2];
-                    if (sc < min_cnt) continue;
+                    if (sc < min_cnt || sc > max_cnt) continue;
                     sy = (toty - cy0) + ybin[j2];
                     sr = (totr - cr0) + rbin[j2];
                 }
@@ -448,7 +454,9 @@ void meebls_fast_kernel(
                         sc = (cc[nb - 1] - c0) + cc[j2w];
                     }
                     cnt_tot += sc;
-                    if (sc < 0.5f) continue;   // band has no point in the window
+                    // identifiable only with points both in and out of the
+                    // window (cc[nb - 1] is the band's total point count)
+                    if (sc < 0.5f || sc > cc[nb - 1] - 0.5f) continue;
                     float denom = sr * (1.f - sr);
                     if (denom <= 0.f) continue;
                     sr2 += bw[b] * sy * sy / denom;
@@ -713,6 +721,7 @@ def multiband_eebls_gpu(
     w_d = cp.asarray(w_all, dtype=cp.float64)
     band_d = cp.asarray(band_all, dtype=cp.int32)
     bw_d = cp.asarray(w_totals, dtype=cp.float64)
+    bn_d = cp.asarray(np.bincount(band_all, minlength=n_bands), dtype=cp.int32)
     f_d = cp.asarray(freqs_np, dtype=cp.float64)
     nf = int(f_d.size)
     power_d = cp.empty(nf, dtype=cp.float64)
@@ -728,7 +737,7 @@ def multiband_eebls_gpu(
         )
     n_blocks = min(nf, 2048)
     _multi_kernel((n_blocks,), (_THREADS,),
-                  (t_d, wx_d, w_d, band_d, bw_d, np.int32(t_d.size), np.int32(n_bands),
+                  (t_d, wx_d, w_d, band_d, bw_d, bn_d, np.int32(t_d.size), np.int32(n_bands),
                    np.int32(nf), f_d, np.int32(nbins), np.int32(kmi), np.int32(kma),
                    np.int32(min(min_points, t_d.size + 1)), power_d),
                   shared_mem=shared)
@@ -796,7 +805,10 @@ def eebls_gpu_fast(
     ``min_points`` is an exact global in-transit point count (same semantics
     as :func:`multiband_bls.eebls` and :func:`eebls_gpu`). Bins and sums are
     float32, so low-power (sub-peak) periodogram values are less accurate than
-    the exact kernels'; the best period's parameters are recomputed exactly.
+    the exact kernels'. ``best_t0``/``best_duration``/``best_depth`` are
+    recomputed exactly on the CPU at the best frequency, while ``power`` and
+    ``best_power`` stay the fast kernel's values; the two need not describe
+    exactly the same box.
     Light curves with ``n >= 2**24`` points are rejected (float32 counts).
     """
     import cupy as cp
@@ -907,9 +919,10 @@ def multiband_eebls_gpu_fast(
     and a band contributes only with >= 1 point in the window (same semantics
     as :func:`multiband_bls.multiband_eebls` and :func:`multiband_eebls_gpu`).
     Bins and sums are float32, so low-power (sub-peak) periodogram values are
-    less accurate than the exact kernels'; the best period's parameters are
-    recomputed exactly. Light curves with ``n >= 2**24`` points in total are
-    rejected (float32 counts).
+    less accurate than the exact kernels'. The best period's parameters are
+    recomputed exactly on the CPU, while ``power``/``best_power`` stay the fast
+    kernel's values (the two need not describe exactly the same box). Light
+    curves with ``n >= 2**24`` points in total are rejected (float32 counts).
     """
     import cupy as cp
 

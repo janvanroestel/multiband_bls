@@ -17,11 +17,11 @@ cnp.import_array()
 
 
 cdef void _multiband_period(const double* phi, const double* wx,
-                            const double* w, const long* band,
+                            const double* w, const cnp.int64_t* band,
                             Py_ssize_t n, int n_bands, double period,
                             double q_max, int min_points,
-                            const double* band_w,
-                            double* s, double* r, long* cnt,
+                            const double* band_w, const cnp.int64_t* band_n,
+                            double* s, double* r, cnp.int64_t* cnt,
                             double* depths, double* out) noexcept nogil:
     """Fill ``out = [SR, t0, duration, k]`` and ``depths[n_bands]`` for one period.
 
@@ -33,7 +33,7 @@ cdef void _multiband_period(const double* phi, const double* wx,
     """
     cdef Py_ssize_t i1, k, i2, i1m, i2p
     cdef int bb, total
-    cdef long b
+    cdef cnp.int64_t b
     cdef double frac, phi_ing, phi_eg, denom, sr2
     cdef double p_i1, p_i1m, p_i2, p_i2p, phi_mid
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0
@@ -48,7 +48,13 @@ cdef void _multiband_period(const double* phi, const double* wx,
             i1m += n
         p_i1 = phi[i1]
         p_i1m = phi[i1m]
-        if p_i1m < p_i1:
+        if p_i1m == p_i1:
+            # i1 sits inside a group of identical phases: an ingress edge here
+            # would put points at the same phase both in and out of transit.
+            continue
+        # Wrap-around is decided by index (sorted phases), not by comparing
+        # values, so tied phases cannot be mistaken for a wrap.
+        if i1 > 0:
             phi_ing = 0.5 * (p_i1m + p_i1)
         else:
             phi_ing = 0.5 * (p_i1m + p_i1) - 0.5
@@ -74,7 +80,7 @@ cdef void _multiband_period(const double* phi, const double* wx,
                 i2p -= n
             p_i2 = phi[i2]
             p_i2p = phi[i2p]
-            if p_i2 < p_i2p:
+            if i2p != 0:
                 phi_eg = 0.5 * (p_i2 + p_i2p)
             else:
                 phi_eg = 0.5 * (p_i2 + p_i2p) + 0.5
@@ -83,13 +89,18 @@ cdef void _multiband_period(const double* phi, const double* wx,
             frac -= floor(frac)
             if frac >= q_max:
                 break
+            if p_i2p == p_i2:
+                continue  # egress edge would split identical phases
             if total < min_points:
                 continue
 
             sr2 = 0.0
             kk = 0
             for bb in range(n_bands):
-                if cnt[bb] < 1:
+                # a band's depth is identifiable only with points both in and
+                # out of the window (r(1-r) > 0 alone fails to rounding when
+                # every point of the band is in the window)
+                if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
                 if denom <= 0.0:
@@ -107,7 +118,7 @@ cdef void _multiband_period(const double* phi, const double* wx,
                 best_t0 = phi_mid * period
                 for bb in range(n_bands):
                     denom = r[bb] * (1.0 - r[bb])
-                    if cnt[bb] >= 1 and denom > 0.0:
+                    if cnt[bb] >= 1 and cnt[bb] < band_n[bb] and denom > 0.0:
                         depths[bb] = s[bb] / denom
                     else:
                         depths[bb] = NAN
@@ -119,7 +130,7 @@ cdef void _multiband_period(const double* phi, const double* wx,
 
 
 def msbls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
-               long[::1] band, int n_bands, double[::1] freqs,
+               cnp.int64_t[::1] band, int n_bands, double[::1] freqs,
                double q_max, int min_points, double[::1] band_w):
     """Scan a frequency grid for the multiband search.
 
@@ -143,13 +154,14 @@ def msbls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
     cdef double[::1] phi_s = np.empty(n, dtype=np.float64)
     cdef double[::1] wx_s = np.empty(n, dtype=np.float64)
     cdef double[::1] w_s = np.empty(n, dtype=np.float64)
-    cdef long[::1] band_s = np.empty(n, dtype=np.int64)
+    cdef cnp.int64_t[::1] band_s = np.empty(n, dtype=np.int64)
     cdef cnp.intp_t[::1] order
 
     # scratch buffers (length n_bands)
     cdef double[::1] s_buf = np.empty(n_bands, dtype=np.float64)
     cdef double[::1] r_buf = np.empty(n_bands, dtype=np.float64)
-    cdef long[::1] cnt_buf = np.empty(n_bands, dtype=np.int64)
+    cdef cnp.int64_t[::1] cnt_buf = np.empty(n_bands, dtype=np.int64)
+    cdef cnp.int64_t[::1] band_n = np.bincount(np.asarray(band), minlength=n_bands).astype(np.int64)
     cdef double[::1] dep_buf = np.empty(n_bands, dtype=np.float64)
 
     cdef double out[4]
@@ -174,7 +186,7 @@ def msbls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
         with nogil:
             _multiband_period(&phi_s[0], &wx_s[0], &w_s[0], &band_s[0], n,
                               n_bands, period, q_max, min_points,
-                              &band_w[0], &s_buf[0], &r_buf[0], &cnt_buf[0],
+                              &band_w[0], &band_n[0], &s_buf[0], &r_buf[0], &cnt_buf[0],
                               &dep_buf[0], out)
         pw[fi] = out[0]
         ku[fi] = <cnp.int64_t>out[3]

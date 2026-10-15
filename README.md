@@ -31,14 +31,20 @@ box, in `[0, 1]`.
 
 ### Interpreting `power`
 
-`power` is a fractional variance, not a significance. In a multiband search, a band
-only contributes to a trial window if it has data both inside and outside the box;
-under pure noise each contributing band adds ~1 to `Δχ²`, so the noise floor grows
-with the number of contributing bands `k`. Multiband CPU results report `k` per
-frequency in `BLSResult.n_bands_used` — compare `power` across frequencies (or
-objects) with care when `k` varies. Band weights assume the quoted `dy` are
-correctly scaled; check `BLSResult.band_chi2_red` (per-band flat-model χ²/dof) and
-use `rescale_errors=True` if bands are mis-scaled relative to each other.
+`power` is a fractional variance, not a significance, and the package does not
+compute false-alarm probabilities. In a multiband search, a band only contributes to a
+trial window if it has data both inside and outside the box. For a *fixed* window and
+correct uncertainties, each contributing band adds ~1 to `Δχ²` under pure noise, so the
+noise level grows with the number of contributing bands `k`; multiband CPU results
+report `k` per frequency in `BLSResult.n_bands_used`. Because `power` is maximised over
+windows, this does not translate directly into a significance for the winning peak —
+calibrate significance empirically (simulations on the actual cadence).
+
+Band weights assume the quoted `dy` are correctly scaled. `BLSResult.band_chi2_red` is
+the per-band flat-model χ²/dof, but genuine variability — above all a deep eclipse —
+raises it too, potentially by a lot, so a high value does not by itself mean the errors
+are underestimated. `rescale_errors=True` (opt-in) divides that out and can therefore
+down-weight exactly the bands with the strongest eclipses; use it with care.
 
 ## Implementations
 
@@ -55,9 +61,12 @@ pip install -e .            # builds the four Cython extension modules
 pip install -e '.[test]'    # + pytest, astropy (for the test suite)
 ```
 
-If the Cython extensions are not compiled, all four search functions fall back
-automatically to the pure-Python reference implementations (with a warning),
-so the package is importable even without a C compiler.
+Prebuilt wheels target Linux x86-64, CPython 3.9–3.13. On other platforms `pip`
+builds from the source distribution, which needs a C compiler (the build always
+compiles the Cython cores; Windows is untested). If the compiled cores cannot be
+imported — e.g. when running from a source checkout without building — the four
+CPU search functions fall back to the pure-Python reference implementations
+(~100× slower) with a warning.
 
 GPU support requires CuPy; install separately for your CUDA version:
 ```bash
@@ -88,6 +97,24 @@ bands = {
 
 Bands may have different numbers of observations; the arrays do not need to be the
 same length across bands.
+
+### Conventions
+
+- **Depth is signed, `in − out`**: positive for an eclipse in magnitudes, negative for
+  an eclipse in flux. The statistic is squared, so the search responds to dimmings and
+  brightenings alike — including opposite signs in different bands.
+- **`best_t0` is the mid-eclipse epoch modulo the period**, in `[0, best_period)` on the
+  time axis of the input `t`; add a multiple of the period to predict a specific eclipse.
+- **A band's depth is only fitted where it is identifiable**: the band needs points both
+  inside and outside the box. Otherwise its depth is NaN and it does not count in
+  `n_bands_used`.
+- **Points with identical phase are never split** between in- and out-of-eclipse (e.g.
+  simultaneous multiband exposures).
+- **Binned durations are rounded outward to whole bins**: the binned searches try box
+  widths from `floor(q_min·nbins)` (at least 1) to `floor(q_max·nbins) + 1` bins.
+- **No solution**: if no box passes the cuts at any frequency, `power` is all zero,
+  `best_power == 0` and the `best_*` fields refer to the first trial frequency. Check
+  `best_power > 0` before using them.
 
 All entry points validate their input and raise `ValueError` (naming the band) for
 non-finite values, `dy <= 0`, `dy` so extreme that `1/dy²` over/underflows, unequal
@@ -204,8 +231,10 @@ controls the log-spacing of transit-width samples; smaller values give denser
 coverage at higher compute cost. `min_points` is an exact global in-transit point
 count, with the same semantics as `eebls` / `multiband_eebls` and the exact GPU
 kernels. Because bins are float32, low-power (sub-peak) periodogram values are less
-accurate than the exact kernels'; the best period's parameters are recomputed
-exactly. We thank
+accurate than the exact kernels'. The best period's parameters (`best_t0`, duration,
+depths) are recomputed on the CPU with the exact binned search at that frequency, while
+`power`/`best_power` stay the fast kernel's values; with log-spaced widths the two need
+not describe exactly the same box. We thank
 `cuvarbase` by John Hoffman for the tricks that inspired the fast kernels.
 
 > **Note:** all binned entry points (Cython, GPU, and the pure-Python
