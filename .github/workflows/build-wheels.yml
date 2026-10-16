@@ -35,6 +35,9 @@ jobs:
           # requires-python is >=3.9, so ship 3.9 wheels too (the GPU env runs 3.9).
           CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
           CIBW_ARCHS_LINUX: x86_64
+          # Current NumPy (a build requirement) ships no manylinux2014 wheels and its
+          # source build needs GCC >= 10.3, newer than the manylinux2014 toolchain.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BUILD_VERBOSITY: 1
           # Import and run the (non-GPU) test suite inside each built wheel so
           # a broken wheel can never ship silently.
