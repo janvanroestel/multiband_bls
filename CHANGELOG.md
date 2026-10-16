@@ -20,11 +20,16 @@ Initial release.
   of silently returning an all-NaN periodogram or truncating. Also rejected:
   `y` large enough to overflow the mean-subtracted signal or its χ²,
   `max|t|·max(f) > 1e15` cycles (phase overflow), and `nbins > 100 000`.
+  GPU entry points also reject more than 2³¹−1 points or frequencies
+  (32-bit kernel indices); the fast GPU entry points reject more than 1e8 phase
+  cycles (median-centred `max|t|·max(f)`, float32 phase accuracy) and a
+  non-finite or negative `dlogq`.
 - `auto_nbins` raises on `q_min <= 0` and warns when the 500-bin cap leaves fewer
   than 5 bins across the narrowest transit (`q_min < 0.01`).
 - Multiband `best_depth` is NaN (was 0) for a band with no in-transit or no
   out-of-transit data at the best solution.
-- New `BLSResult.n_bands_used` (multiband CPU/reference): number of bands
+- New `BLSResult.n_bands_used` (all multiband entry points;
+  `multiband_eebls_gpu_fast(..., compute_n_bands_used=False)` skips it): number of bands
   contributing at each frequency's best window — the noise floor of `power`
   grows with it.
 - New `BLSResult.band_chi2_red` (multiband): per-band flat-model χ²/dof of the

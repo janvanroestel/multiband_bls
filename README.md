@@ -211,7 +211,7 @@ All entry points return an `BLSResult` dataclass:
 | `best_depth` | `float` or `ndarray` | depth (single-band) or per-band depths array (multiband); NaN for a band not measured at the best solution |
 | `best_power` | `float` | peak power value |
 | `bands` | `tuple[str, ...]` or `None` | band labels for multiband results |
-| `n_bands_used` | `ndarray[int64]` or `None` | multiband CPU/reference only: bands contributing to each frequency's best window (0 = no window) |
+| `n_bands_used` | `ndarray[int64]` or `None` | multiband: bands contributing to each frequency's best window (0 = no window); `None` from `multiband_eebls_gpu_fast(..., compute_n_bands_used=False)` |
 | `band_chi2_red` | `ndarray` or `None` | multiband only: per-band flat-model χ²/dof of the input `dy` |
 
 ## GPU backend
@@ -226,7 +226,8 @@ additional throughput at the cost of ~single-precision accuracy: phase bins are
 converted to prefix sums (each trial window is an O(1) lookup), only a
 log-spaced subset of transit widths is evaluated, and the phase fold runs in
 float-float (two-float32) arithmetic — several times faster than float64 on
-consumer GPUs at ~1e-10 phase error. The `dlogq` parameter (default 0.3)
+consumer GPUs, at ≤ ~4e-8 phase error for up to 1e6 cycles (median-centred
+`max|t|·max(f)`; inputs beyond 1e8 cycles are rejected). The `dlogq` parameter (default 0.3)
 controls the log-spacing of transit-width samples; smaller values give denser
 coverage at higher compute cost. `min_points` is an exact global in-transit point
 count, with the same semantics as `eebls` / `multiband_eebls` and the exact GPU
@@ -234,7 +235,12 @@ kernels. Because bins are float32, low-power (sub-peak) periodogram values are l
 accurate than the exact kernels'. The best period's parameters (`best_t0`, duration,
 depths) are recomputed on the CPU with the exact binned search at that frequency, while
 `power`/`best_power` stay the fast kernel's values; with log-spaced widths the two need
-not describe exactly the same box. We thank
+not describe exactly the same box. Both multiband GPU kernels fill `n_bands_used`
+(at no measurable cost in the exact kernel). In `multiband_eebls_gpu_fast` the count
+costs up to ~15% kernel time for sparse light curves with few bands (~1–5% otherwise);
+pass `compute_n_bands_used=False` to skip it. Because the fast kernel bins median-centred times and samples log-spaced widths,
+its best window, and hence `n_bands_used`, can differ from the CPU's at some
+frequencies. We thank
 `cuvarbase` by John Hoffman for the tricks that inspired the fast kernels.
 
 > **Note:** all binned entry points (Cython, GPU, and the pure-Python

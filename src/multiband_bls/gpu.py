@@ -56,9 +56,24 @@ _MAX_BANDS: int = 8
 # The fast kernels count in-transit points in float32 bins; integer sums are
 # exact only below 2**24, so larger light curves are rejected.
 _MAX_FAST_POINTS: int = 2**24
+# The kernels take point and frequency counts as C int; larger inputs would wrap.
+_MAX_INT32: int = int(np.iinfo(np.int32).max)
 # The fast kernels hold median-centred times and frequencies in float32; keep
 # both far below float32's ~3.4e38 so the casts and fold products stay finite.
 _MAX_FAST_FLOAT32: float = 1e30
+# The float-float fold's absolute phase error grows ~ 7e-15 per cycle of
+# max|t_centred| * max(f) (measured: <= 4e-8 up to 1e6 cycles, 7e-7 at 1e8, 7e-5 at
+# 1e10); beyond 1e8 cycles it is no longer small against a 1/nbins bin.
+_MAX_FAST_CYCLES: float = 1e8
+
+
+def _check_int32_sizes(n: int, nf: int, name: str) -> None:
+    """Raise unless the point and frequency counts fit the kernels' 32-bit ints."""
+    if n > _MAX_INT32 or nf > _MAX_INT32:
+        raise ValueError(
+            f"{name}: {n} points and {nf} frequencies; both must be at most "
+            f"{_MAX_INT32} (32-bit kernel indices). Split the frequency grid."
+        )
 
 
 def _check_fast_float32(t_centered: Array, frequencies: Array, name: str) -> None:
@@ -71,6 +86,22 @@ def _check_fast_float32(t_centered: Array, frequencies: Array, name: str) -> Non
             f"({f_max:.3g}) must stay below {_MAX_FAST_FLOAT32:.0e} for the "
             "float32 kernel; use the exact GPU entry point."
         )
+    if t_max * f_max > _MAX_FAST_CYCLES:
+        raise ValueError(
+            f"{name}: median-centred max|t| * max(f) = {t_max * f_max:.3g} cycles "
+            f"exceeds {_MAX_FAST_CYCLES:.0e}, beyond which the float32 phase fold "
+            "loses accuracy; use the exact GPU entry point."
+        )
+
+
+def _check_dlogq(dlogq: float, name: str) -> float:
+    """Return ``dlogq`` as a float; raise unless it is a finite real number >= 0."""
+    if isinstance(dlogq, bool) or not isinstance(dlogq, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name}: dlogq must be a real number, got {dlogq!r}.")
+    dlogq = float(dlogq)
+    if not (np.isfinite(dlogq) and dlogq >= 0.0):
+        raise ValueError(f"{name}: dlogq must be finite and >= 0, got {dlogq!r}.")
+    return dlogq
 
 # --------------------------------------------------------------------------- #
 # CUDA kernels                                                                 #
@@ -143,7 +174,7 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                    const int* __restrict__ band_n,
                    int n, int n_bands, int nf,
                    const double* __restrict__ freqs, int nb, int kmi, int kma,
-                   int min_points, double* power) {
+                   int min_points, double* power, int* kout) {
     extern __shared__ double sh[];           // ybin/rbin/cbin each n_bands*nb
     double* ybin = sh;
     double* rbin = sh + n_bands * nb;
@@ -151,6 +182,7 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
     int tid = threadIdx.x;
     int tot = n_bands * nb;
     __shared__ double red[256];              // sized for _THREADS = 256
+    __shared__ int red_k[256];               // bands used by red[] (n_bands_used)
 
     double bw[8];                            // band weights cached in registers
     int bn[8];                               // points per band
@@ -172,7 +204,7 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
         }
         __syncthreads();
 
-        double best = 0.0;
+        double best = 0.0; int best_k = 0;
         double s[8], r[8]; int cnt[8];
         for (int i1 = tid; i1 < nb; i1 += blockDim.x) {
             for (int b = 0; b < n_bands; b++) { s[b] = 0; r[b] = 0; cnt[b] = 0; }
@@ -185,23 +217,25 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                 }
                 if (ww < kmi) continue;
                 if (total < min_points) continue;
-                double T3 = 0.0;
+                double T3 = 0.0; int kk = 0;
                 for (int b = 0; b < n_bands; b++) {
                     // identifiable only with points both in and out of the window
                     if (cnt[b] < 1 || cnt[b] >= bn[b]) continue;
                     double denom = r[b] * (1.0 - r[b]);
                     if (denom <= 0.0) continue;
-                    T3 += bw[b] * s[b] * s[b] / denom;
+                    T3 += bw[b] * s[b] * s[b] / denom; kk++;
                 }
-                if (T3 > best) best = T3;
+                if (T3 > best) { best = T3; best_k = kk; }
             }
         }
-        red[tid] = best; __syncthreads();
+        red[tid] = best; red_k[tid] = best_k; __syncthreads();
         for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-            if (tid < stride) { if (red[tid + stride] > red[tid]) red[tid] = red[tid + stride]; }
+            if (tid < stride && red[tid + stride] > red[tid]) {
+                red[tid] = red[tid + stride]; red_k[tid] = red_k[tid + stride];
+            }
             __syncthreads();
         }
-        if (tid == 0) power[f] = red[0];
+        if (tid == 0) { power[f] = red[0]; kout[f] = red_k[0]; }
         __syncthreads();  // ensure red[0] is read before next f reuses it
     }
 }
@@ -211,7 +245,8 @@ _FAST_HELPERS = r"""
 // float-float ("double-single") phase fold: t and freq are split into
 // (hi, lo) float32 pairs; the exact error of the hi*hi product is recovered
 // with an fmaf twoProd and the cross terms added to it. Absolute phase error
-// ~1e-10 (bin width is >= 1/500), at full FP32 rate instead of the 1/64-rate
+// <= ~4e-8 (float32 resolution of the result) up to 1e6 cycles, growing ~7e-15 per
+// cycle beyond (the host rejects > 1e8 cycles), at full FP32 rate instead of the 1/64-rate
 // FP64 multiply+floor on consumer GPUs. Requires |t| reduced (median
 // subtracted on the host) so t*freq stays well inside float range.
 __device__ __forceinline__ float fold_ff(float t_hi, float t_lo,
@@ -364,7 +399,10 @@ _FAST_BOX_MULTI_SRC = _FAST_HELPERS + r"""
 // drops float32 cumsum-cancellation residue in empty windows).
 // Float32 bins; float-float phase fold; band_w in registers; SR^2 comparison;
 // warp-shuffle reduction; persistent grid-stride; __launch_bounds__ + __ldg.
-// Shared memory: (3*n_bands*nb + 8) * 4 bytes  (~35.2 KB for n_bands=6, nb=500)
+// Compile with -DWITH_K to also write the contributing-band count of each
+// frequency's best window to kout (n_bands_used); without it kout is unused.
+// Shared memory: (3*n_bands*nb + 8) * 4 bytes, + 32 B with WITH_K
+// (~35.2 KB for n_bands=6, nb=500)
 extern "C" __global__ __launch_bounds__(256, 4)
 void meebls_fast_kernel(
     const float* __restrict__ t_hi,
@@ -376,10 +414,13 @@ void meebls_fast_kernel(
     int n, int n_bands, int nf,
     const double* __restrict__ freqs, int nb,
     const int* __restrict__ widths, int n_widths,
-    int min_points, double* power)
+    int min_points, double* power, int* kout)
 {
     extern __shared__ float sh[];             // ybin[b][nb], rbin[b][nb], cbin[b][nb]
     float* warp_max = sh + 3 * n_bands * nb;  // 8 floats (one per warp)
+#ifdef WITH_K
+    int* warp_k = (int*)(warp_max + 8);       // 8 ints: bands used by warp_max
+#endif
 
     int tid  = threadIdx.x;
     int lane = tid & 31;
@@ -425,6 +466,9 @@ void meebls_fast_kernel(
         __syncthreads();
 
         float best2 = 0.f;
+#ifdef WITH_K
+        int best_k = 0;
+#endif
         for (int i1 = tid; i1 < nb; i1 += blockDim.x) {
             for (int wi = 0; wi < n_widths; wi++) {
                 int ww = __ldg(&widths[wi]);
@@ -435,7 +479,7 @@ void meebls_fast_kernel(
                 // statistic of the bands that have points in the window; the
                 // total-count gate is applied afterwards (same result as the
                 // CPU's gate-then-sum, without per-band scratch arrays).
-                float cnt_tot = 0.f, sr2 = 0.f;
+                float cnt_tot = 0.f, sr2 = 0.f; int kk = 0;
                 for (int b = 0; b < n_bands; b++) {
                     const float* cy = sh + b * nb;
                     const float* cr = sh + tot + b * nb;
@@ -459,13 +503,35 @@ void meebls_fast_kernel(
                     if (sc < 0.5f || sc > cc[nb - 1] - 0.5f) continue;
                     float denom = sr * (1.f - sr);
                     if (denom <= 0.f) continue;
-                    sr2 += bw[b] * sy * sy / denom;
+                    sr2 += bw[b] * sy * sy / denom; kk++;
                 }
                 if (cnt_tot < min_cnt) continue;
+                #ifdef WITH_K
+                if (sr2 > best2) { best2 = sr2; best_k = kk; }
+#else
+                (void)kk;
                 if (sr2 > best2) best2 = sr2;
+#endif
             }
         }
 
+#ifdef WITH_K
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            float ov = __shfl_down_sync(0xffffffff, best2, offset);
+            int ok = __shfl_down_sync(0xffffffff, best_k, offset);
+            if (ov > best2) { best2 = ov; best_k = ok; }
+        }
+        if ((tid & 31) == 0) { warp_max[tid >> 5] = best2; warp_k[tid >> 5] = best_k; }
+        __syncthreads();
+        if (tid == 0) {
+            int kb = warp_k[0];
+            best2 = warp_max[0];
+            for (int q = 1; q < 8; q++)
+                if (warp_max[q] > best2) { best2 = warp_max[q]; kb = warp_k[q]; }
+            power[f] = (double)best2;
+            kout[f] = kb;
+        }
+#else
         for (int offset = 16; offset > 0; offset >>= 1)
             best2 = fmaxf(best2, __shfl_down_sync(0xffffffff, best2, offset));
         if ((tid & 31) == 0) warp_max[tid >> 5] = best2;
@@ -477,6 +543,7 @@ void meebls_fast_kernel(
                                 fmaxf(warp_max[6], warp_max[7])));
             power[f] = (double)best2;
         }
+#endif
         __syncthreads();
     }
 }
@@ -486,6 +553,7 @@ _single_kernel: Any = None
 _multi_kernel: Any = None
 _fast_single_kernel: Any = None
 _fast_multi_kernel: Any = None
+_fast_multi_kernel_k: Any = None  # WITH_K variant (n_bands_used)
 _max_smem: int = 65536  # updated at first _kernels() call from device attributes
 
 
@@ -501,7 +569,7 @@ def gpu_available() -> bool:
 
 def _kernels() -> None:
     global _single_kernel, _multi_kernel
-    global _fast_single_kernel, _fast_multi_kernel
+    global _fast_single_kernel, _fast_multi_kernel, _fast_multi_kernel_k
     global _max_smem
     if _single_kernel is None:
         import cupy as cp
@@ -511,6 +579,8 @@ def _kernels() -> None:
         _multi_kernel = cp.RawKernel(_MULTI_SRC, "meebls_kernel")
         _fast_single_kernel = cp.RawKernel(_FAST_BOX_SINGLE_SRC, "eebls_fast_kernel")
         _fast_multi_kernel = cp.RawKernel(_FAST_BOX_MULTI_SRC, "meebls_fast_kernel")
+        _fast_multi_kernel_k = cp.RawKernel(_FAST_BOX_MULTI_SRC, "meebls_fast_kernel",
+                                            options=("-DWITH_K",))
         # Opt into the device maximum for dynamic shared memory. The requested
         # dynamic size must leave room for the kernel's own static shared memory
         # (the exact kernels carry a static `red[256]` reduction buffer), so
@@ -526,6 +596,9 @@ def _kernels() -> None:
         )
         _fast_multi_kernel.max_dynamic_shared_size_bytes = (
             _max_smem - _fast_multi_kernel.attributes["shared_size_bytes"]
+        )
+        _fast_multi_kernel_k.max_dynamic_shared_size_bytes = (
+            _max_smem - _fast_multi_kernel_k.attributes["shared_size_bytes"]
         )
     # fast kernels are accessed as module globals by the fast entry points
 
@@ -579,6 +652,7 @@ def _result(
     refine_fn: Callable[[float], BLSResult],
     bands: tuple[str, ...] | None = None,
     band_chi2_red: Array | None = None,
+    n_bands_used: npt.NDArray[np.int64] | None = None,
 ) -> BLSResult:
     power = variance_explained(power_raw, chi2_flat)
     best_idx = int(np.argmax(power))
@@ -594,6 +668,7 @@ def _result(
         best_depth=ref.best_depth,
         best_power=float(power[best_idx]),
         bands=bands,
+        n_bands_used=n_bands_used,
         band_chi2_red=band_chi2_red,
     )
 
@@ -639,6 +714,7 @@ def eebls_gpu(
         nbins = auto_nbins(q_min)
     t, y, dy = _validate_light_curve(t, y, dy)
     _check_phase_range(t, freqs_np)
+    _check_int32_sizes(t.shape[0], freqs_np.size, "eebls_gpu")
     _kernels()
     wx, w_hat, yy = _preprocess_single(y, dy)
 
@@ -700,6 +776,12 @@ def multiband_eebls_gpu(
         Minimum number of in-transit points required across all bands.
     rescale_errors :
         As in :func:`multiband_bls.multiband_sparse_bls`.
+
+    Notes
+    -----
+    Fills :attr:`BLSResult.n_bands_used` like the CPU core. Where several windows
+    tie exactly for the best statistic, the GPU reduction may keep a different one
+    than the CPU's first-found window, so ``k`` can then differ.
     """
     import cupy as cp
 
@@ -712,6 +794,7 @@ def multiband_eebls_gpu(
     _kernels()
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     _check_phase_range(t_all, freqs_np)
+    _check_int32_sizes(t_all.shape[0], freqs_np.size, "multiband_eebls_gpu")
     n_bands = len(labels)
     if n_bands > _MAX_BANDS:
         raise ValueError(f"GPU multiband kernel supports up to {_MAX_BANDS} bands")
@@ -725,6 +808,7 @@ def multiband_eebls_gpu(
     f_d = cp.asarray(freqs_np, dtype=cp.float64)
     nf = int(f_d.size)
     power_d = cp.empty(nf, dtype=cp.float64)
+    k_d = cp.zeros(nf, dtype=cp.int32)
     kmi, kma = _grid_params(nbins, q_min, q_max)
 
     shared = 3 * n_bands * nbins * 8
@@ -739,16 +823,17 @@ def multiband_eebls_gpu(
     _multi_kernel((n_blocks,), (_THREADS,),
                   (t_d, wx_d, w_d, band_d, bw_d, bn_d, np.int32(t_d.size), np.int32(n_bands),
                    np.int32(nf), f_d, np.int32(nbins), np.int32(kmi), np.int32(kma),
-                   np.int32(min(min_points, t_d.size + 1)), power_d),
+                   np.int32(min(min_points, t_d.size + 1)), power_d, k_d),
                   shared_mem=shared)
     power = cp.asnumpy(power_d)
+    n_bands_used = cp.asnumpy(k_d).astype(np.int64)
     # Refine on the already-prepared (possibly rescaled) bands so power and the
     # refined parameters share one objective.
     return _result(power, chi2_flat, freqs_np,
                    lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
                                               q_min=q_min, q_max=q_max,
                                               min_points=min_points),
-                   bands=labels, band_chi2_red=chi2_red)
+                   bands=labels, band_chi2_red=chi2_red, n_bands_used=n_bands_used)
 
 
 def eebls_gpu_fast(
@@ -769,7 +854,9 @@ def eebls_gpu_fast(
     O(kma - kmi) to O(log(kma/kmi) / log(1 + dlogq)). The phase bins are
     turned into cumulative sums so each window is an O(1) lookup, and the
     phase fold runs in float-float (two-float32) arithmetic, which is several
-    times faster than float64 on consumer GPUs at ~1e-10 phase error.
+    times faster than float64 on consumer GPUs, with an absolute phase error of
+    <= ~4e-8 for up to 1e6 cycles (median-centred ``max|t| * max(f)``); inputs beyond
+    1e8 cycles are rejected.
 
     Parameters
     ----------
@@ -820,12 +907,14 @@ def eebls_gpu_fast(
         nbins = auto_nbins(q_min)
     t, y, dy = _validate_light_curve(t, y, dy)
     _check_phase_range(t, freqs_np)
+    _check_int32_sizes(t.shape[0], freqs_np.size, "eebls_gpu_fast")
     if t.shape[0] >= _MAX_FAST_POINTS:
         raise ValueError(
             f"eebls_gpu_fast supports fewer than {_MAX_FAST_POINTS} points "
             f"(float32 point counts), got {t.shape[0]}; use eebls_gpu."
         )
 
+    dlogq = _check_dlogq(dlogq, "eebls_gpu_fast")
     _kernels()  # ensure compiled
     wx, w_hat, yy = _preprocess_single(y, dy)
 
@@ -881,6 +970,7 @@ def multiband_eebls_gpu_fast(
     min_points: int = 3,
     dlogq: float = 0.3,
     rescale_errors: bool = False,
+    compute_n_bands_used: bool = True,
 ) -> BLSResult:
     """Fast GPU binned multiband BLS using prefix-sum bins and log-spaced widths.
 
@@ -909,6 +999,11 @@ def multiband_eebls_gpu_fast(
         Typical range: 0.1 – 0.5.
     rescale_errors :
         As in :func:`multiband_bls.multiband_sparse_bls`.
+    compute_n_bands_used :
+        Fill :attr:`BLSResult.n_bands_used` (default). Pass False to leave it
+        ``None`` and skip the count, which costs up to ~15% kernel time for sparse
+        light curves with few bands (measured: 3 bands, n = 1k–3k points) and
+        ~1–5% otherwise.
 
     Notes
     -----
@@ -923,6 +1018,12 @@ def multiband_eebls_gpu_fast(
     recomputed exactly on the CPU, while ``power``/``best_power`` stay the fast
     kernel's values (the two need not describe exactly the same box). Light
     curves with ``n >= 2**24`` points in total are rejected (float32 counts).
+
+    ``n_bands_used`` counts the bands of the window this kernel
+    selects. It matches :func:`multiband_bls.multiband_eebls` when both search
+    the same windows, but this function bins median-centred times (so its phase
+    bins start elsewhere) and evaluates only log-spaced widths, so its best window,
+    and hence ``k``, can differ at some frequencies.
     """
     import cupy as cp
 
@@ -933,9 +1034,12 @@ def multiband_eebls_gpu_fast(
         nbins = auto_nbins(q_min)
     bands, chi2_red = _prepare_bands(bands, rescale_errors)
 
+    dlogq = _check_dlogq(dlogq, "multiband_eebls_gpu_fast")
     _kernels()  # ensure compiled
+    kernel = _fast_multi_kernel_k if compute_n_bands_used else _fast_multi_kernel
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     _check_phase_range(t_all, freqs_np)
+    _check_int32_sizes(t_all.shape[0], freqs_np.size, "multiband_eebls_gpu_fast")
     n_bands = len(labels)
     if n_bands > _MAX_BANDS:
         raise ValueError(f"GPU multiband kernel supports up to {_MAX_BANDS} bands")
@@ -968,28 +1072,32 @@ def multiband_eebls_gpu_fast(
                  nbins, kmi, kma, n_widths, kma - kmi + 1)
 
     power_d = cp.empty(nf, dtype=cp.float64)
+    # k output; a 1-element placeholder when the kernel is compiled without WITH_K
+    k_d = cp.zeros(nf if compute_n_bands_used else 1, dtype=cp.int32)
     n_blocks = min(nf, 2048)
-    # float32: ybin + rbin + cbin (per band) + warp_max[8]
-    shared = (3 * n_bands * nbins + 8) * 4
-    smem_cap = _fast_multi_kernel.max_dynamic_shared_size_bytes
+    # float32: ybin + rbin + cbin (per band) + warp_max[8] (+ int warp_k[8])
+    n_extra = 16 if compute_n_bands_used else 8
+    shared = (3 * n_bands * nbins + n_extra) * 4
+    smem_cap = kernel.max_dynamic_shared_size_bytes
     if shared > smem_cap:
         raise ValueError(
             f"multiband_eebls_gpu_fast needs {shared} B of dynamic shared memory "
-            f"((3 * n_bands={n_bands} * nbins={nbins} + 8) * 4) but the device "
-            f"allows {smem_cap} B; reduce nbins or n_bands."
+            f"((3 * n_bands={n_bands} * nbins={nbins} + {n_extra}) * 4) but the "
+            f"device allows {smem_cap} B; reduce nbins or n_bands."
         )
-    _fast_multi_kernel(
+    kernel(
         (n_blocks,), (_THREADS,),
         (thi_d, tlo_d, wx_d, w_d, band_d, bw_d, np.int32(n), np.int32(n_bands),
          np.int32(nf), f_d, np.int32(nbins), widths_d, np.int32(n_widths),
-         np.int32(min(min_points, n + 1)), power_d),
+         np.int32(min(min_points, n + 1)), power_d, k_d),
         shared_mem=shared,
     )
     power = cp.asnumpy(power_d)
+    n_bands_used = cp.asnumpy(k_d).astype(np.int64) if compute_n_bands_used else None
     # Refine on the already-prepared (possibly rescaled) bands so power and the
     # refined parameters share one objective.
     return _result(power, chi2_flat, freqs_np,
                    lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
                                               q_min=q_min, q_max=q_max,
                                               min_points=min_points),
-                   bands=labels, band_chi2_red=chi2_red)
+                   bands=labels, band_chi2_red=chi2_red, n_bands_used=n_bands_used)

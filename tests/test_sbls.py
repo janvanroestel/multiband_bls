@@ -613,6 +613,41 @@ def test_gpu_fast_rejects_float32_overflow():
         multiband_eebls_gpu_fast({"g": (t_wide, y, dy)}, freqs, nbins=50)
 
 
+@_GPU
+def test_gpu_fast_rejects_too_many_phase_cycles():
+    """Each of |t| and f fits float32, but their product exceeds the float-float
+    fold's accuracy range; the exact (float64) GPU path still accepts it."""
+    t, y, dy = _small_lc()
+    t_wide = np.linspace(-5e3, 5e3, t.shape[0])     # centred |t| = 5e3 d
+    freqs = np.array([1e5, 1.1e5])                  # 5.5e8 cycles > 1e8, < 1e15
+    eebls_gpu(t_wide, y, dy, freqs, nbins=50)
+    with pytest.raises(ValueError, match="cycles"):
+        eebls_gpu_fast(t_wide, y, dy, freqs, nbins=50)
+    with pytest.raises(ValueError, match="cycles"):
+        multiband_eebls_gpu_fast({"g": (t_wide, y, dy)}, freqs, nbins=50)
+    # just inside the limit is accepted
+    eebls_gpu_fast(t_wide, y, dy, np.array([1e4, 1.9e4]), nbins=50)
+
+
+@_GPU
+@pytest.mark.parametrize("dlogq", [np.nan, np.inf, -np.inf, -0.1, True, "0.3", None])
+def test_gpu_fast_rejects_invalid_dlogq(dlogq):
+    t, y, dy = _small_lc()
+    for call in (lambda: eebls_gpu_fast(t, y, dy, _VFREQS, nbins=50, dlogq=dlogq),
+                 lambda: multiband_eebls_gpu_fast({"g": (t, y, dy)}, _VFREQS, nbins=50,
+                                                  dlogq=dlogq)):
+        with pytest.raises(ValueError, match="dlogq"):
+            call()
+
+
+@_GPU
+def test_gpu_fast_dlogq_zero_is_linear_search():
+    t, y, dy = _small_lc()
+    lin = eebls_gpu_fast(t, y, dy, _VFREQS, nbins=50, dlogq=0)
+    dense = eebls_gpu_fast(t, y, dy, _VFREQS, nbins=50, dlogq=1e-6)
+    np.testing.assert_allclose(lin.power, dense.power, rtol=1e-5, atol=1e-7)
+
+
 @pytest.mark.parametrize(("fn", "binned"), _SINGLE_ENTRIES)
 def test_single_band_huge_min_points_rejects_every_window(fn, binned):
     res = fn(*_small_lc(), _VFREQS, min_points=10**12)   # beyond C int: capped
@@ -860,6 +895,26 @@ def test_gpu_fast_rejects_too_many_points(monkeypatch, lightcurve, freqs):
         multiband_eebls_gpu_fast(bands, freqs)
 
 
+@_GPU
+@pytest.mark.parametrize("too_many", ["points", "frequencies"])
+def test_gpu_rejects_counts_beyond_int32(monkeypatch, lightcurve, freqs, too_many):
+    """Point/frequency counts are C ints in every kernel; larger ones must raise
+    instead of wrapping (limit monkeypatched rather than allocating 2**31)."""
+    bands, _ = lightcurve
+    t, y, dy = bands["r"]
+    if too_many == "points":
+        limit, f = t.size - 1, freqs[:5]
+    else:
+        limit, f = freqs.size - 1, freqs
+    monkeypatch.setattr(gpu_mod, "_MAX_INT32", limit)
+    for call in (lambda: eebls_gpu(t, y, dy, f),
+                 lambda: eebls_gpu_fast(t, y, dy, f),
+                 lambda: multiband_eebls_gpu({"r": (t, y, dy)}, f),
+                 lambda: multiband_eebls_gpu_fast({"r": (t, y, dy)}, f)):
+        with pytest.raises(ValueError, match="32-bit kernel indices"):
+            call()
+
+
 # --------------------------------------------------------------------------- #
 # Numerical robustness (pre-release review): constants, missing baseline, ties #
 # --------------------------------------------------------------------------- #
@@ -937,6 +992,49 @@ def test_gpu_band_without_baseline_matches_cpu():
     assert np.all(gpu.power <= 1.0 + 1e-9)
     fast = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.1)
     assert np.all(fast.power <= 1.0 + 1e-6)
+    i = int(np.argmin(np.abs(freqs - 1.0)))
+    assert gpu.n_bands_used[i] == cpu.n_bands_used[i] == 1
+
+
+@_GPU
+def test_gpu_n_bands_used_matches_cpu(lightcurve, freqs):
+    """Exact GPU kernel reports the CPU's k; the fast kernel does when asked and
+    when it searches the same windows (centred t, every width)."""
+    bands, _ = lightcurve
+    bands = _centered(bands)
+    kw = {"nbins": 200, "q_max": 0.12, "min_points": 3}
+    cpu = multiband_eebls(bands, freqs, **kw)
+    gpu = multiband_eebls_gpu(bands, freqs, **kw)
+    assert gpu.n_bands_used.dtype == np.int64
+    np.testing.assert_array_equal(gpu.n_bands_used, cpu.n_bands_used)
+
+    fast = multiband_eebls_gpu_fast(bands, freqs, dlogq=1e-4,
+                                    compute_n_bands_used=False, **kw)
+    assert fast.n_bands_used is None  # opt-out
+    fast_k = multiband_eebls_gpu_fast(bands, freqs, dlogq=1e-4, **kw)
+    assert fast_k.n_bands_used.dtype == np.int64
+    # float32 near-ties may pick another window at a few sub-peak frequencies
+    assert np.mean(fast_k.n_bands_used == cpu.n_bands_used) > 0.99
+    i = int(np.argmax(cpu.power))
+    assert fast_k.n_bands_used[i] == cpu.n_bands_used[i]
+    # the k variant computes the same periodogram
+    np.testing.assert_allclose(fast_k.power, fast.power, rtol=1e-5, atol=1e-7)
+    assert fast_k.best_frequency == fast.best_frequency
+    # default (log-spaced) widths: k still within range and >= 1 where power > 0
+    k = multiband_eebls_gpu_fast(bands, freqs, **kw).n_bands_used
+    assert np.all((k >= 0) & (k <= len(bands)))
+
+
+@_GPU
+def test_gpu_flat_light_curve_n_bands_used_zero():
+    rng = np.random.default_rng(11)
+    bands = {b: (np.sort(rng.uniform(0, 30, 30)), np.zeros(30), np.full(30, 0.03))
+             for b in ("g", "r")}
+    freqs = np.linspace(0.5, 2.0, 4)
+    for res in (multiband_eebls_gpu(bands, freqs, nbins=50),
+                multiband_eebls_gpu_fast(bands, freqs, nbins=50)):
+        assert np.all(res.power == 0.0)
+        assert np.all(res.n_bands_used == 0)
 
 
 _TIED_T = np.array([0.0, 0.05, 0.05, 0.05, 0.1, 0.4, 0.6, 0.8])

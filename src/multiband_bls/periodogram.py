@@ -43,7 +43,8 @@ class BLSResult:
     bands:
         Band labels for a multiband result, else ``None``.
     n_bands_used:
-        Multiband CPU/reference results only (else ``None``): for each trial
+        Multiband results (else ``None``; also ``None`` from
+        :func:`multiband_eebls_gpu_fast` with ``compute_n_bands_used=False``): for each trial
         frequency, the number of bands ``k`` contributing to that frequency's
         best window, or 0 if no window was selected there. For a fixed window
         and correct uncertainties each contributing band adds ~1 to
