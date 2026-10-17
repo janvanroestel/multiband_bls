@@ -6,6 +6,13 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Distributions are attached to the GitHub Release only; there is intentionally no
+# PyPI upload step yet (v0.1.0 is a GitHub-only release).
+# Read-only token by default; only the release job gets write access (to create
+# the release), so build-time actions and dependencies never hold a write token.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build wheels (Linux x86_64)
@@ -14,28 +21,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check that the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject version v$v"; exit 1
+          fi
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.23
         env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          # requires-python is >=3.9, so ship 3.9 wheels too (the GPU env runs 3.9).
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
           CIBW_ARCHS_LINUX: x86_64
+          # Current NumPy (a build requirement) ships no manylinux2014 wheels and its
+          # source build needs GCC >= 10.3, newer than the manylinux2014 toolchain.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
           CIBW_BUILD_VERBOSITY: 1
           # Import and run the (non-GPU) test suite inside each built wheel so
           # a broken wheel can never ship silently.
+          # pyproject's addopts add --cov/--cov-fail-under (needs pytest-cov and is
+          # meaningless for an installed wheel); override them for the wheel test.
           CIBW_TEST_REQUIRES: pytest astropy
-          CIBW_TEST_COMMAND: pytest {project}/tests -k "not gpu"
+          CIBW_TEST_COMMAND: >-
+            python -c "import multiband_bls as m, multiband_bls.api as api;
+            from multiband_bls import _sbls, _msbls, _eebls, _meebls;
+            assert m.sparse_bls is api.sparse_bls and m.multiband_eebls is api.multiband_eebls"
+            && pytest {project}/tests -k "not gpu" -o addopts="-ra --strict-markers"
 
       - name: Upload wheels as artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheels
           path: wheelhouse/*.whl
-
-      - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: wheelhouse/*.whl
 
   sdist:
     name: Build source distribution
@@ -44,8 +63,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check that the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject version v$v"; exit 1
+          fi
+
       - name: Build sdist
         run: pipx run build --sdist
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The generated .c files are not tracked, so the sdist must carry every
+      # .pyx and build from them. Build a wheel from the tarball itself (not the
+      # checkout) and import it from outside the source tree.
+      - name: Build and smoke-test a wheel from the sdist
+        run: |
+          tar tzf dist/*.tar.gz > sdist-files.txt
+          for m in _sbls _msbls _eebls _meebls; do
+            grep -q "src/multiband_bls/$m.pyx$" sdist-files.txt || { echo "missing $m.pyx"; exit 1; }
+          done
+          if grep -q '\.c$' sdist-files.txt; then echo "sdist contains generated .c"; exit 1; fi
+          python -m pip install --upgrade pip
+          python -m pip wheel dist/*.tar.gz --no-deps -w sdist-wheel/
+          python -m pip install sdist-wheel/*.whl
+          cd "$RUNNER_TEMP"
+          # The package falls back to the pure-Python references if the compiled
+          # cores fail to import; require the compiled ones explicitly.
+          python -c "import multiband_bls as m, multiband_bls.api as api; from multiband_bls import _sbls, _msbls, _eebls, _meebls; assert m.sparse_bls is api.sparse_bls and m.multiband_eebls is api.multiband_eebls"
+          python -c "import multiband_bls as m, numpy as np; t = np.linspace(0, 10, 200); r = m.sparse_bls(t, np.sin(t), np.ones(200), np.linspace(0.5, 2, 50)); print(r.best_period)"
 
       - name: Upload sdist as artifact
         uses: actions/upload-artifact@v4
@@ -53,8 +103,24 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
+  # One job attaches everything, after both builds succeed: two jobs creating the
+  # same release concurrently can race and leave a partial release.
+  release:
+    name: Attach distributions to the GitHub Release
+    needs: [build, sdist]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: dist/*
+          fail_on_unmatched_files: true

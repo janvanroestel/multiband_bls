@@ -21,7 +21,16 @@ import numpy.typing as npt
 
 from . import _eebls, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
 from .periodogram import BLSResult
-from .reference import _merge_band_arrays, auto_nbins, preprocess, variance_explained
+from .reference import (
+    _check_phase_range,
+    _merge_band_arrays,
+    _prepare_bands,
+    _validate_light_curve,
+    _validate_search_params,
+    auto_nbins,
+    preprocess,
+    variance_explained,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +105,26 @@ def sparse_bls(
     q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
-        Minimum number of in-transit points required.
+        Minimum number of in-transit points required. Unlike the binned
+        variants there is no minimum duration (``q_min``), so this is the only
+        guard against ultra-narrow boxes. Note the default ``q_max`` (0.15)
+        differs from the binned variants' (0.10).
+
+    Raises
+    ------
+    ValueError
+        On invalid input: non-finite values, ``dy <= 0``, unequal lengths,
+        non-positive frequencies, ``q_max`` outside ``(0, 1)``, or a
+        non-integer / ``< 1`` ``min_points``.
     """
+    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    t, y, dy = _validate_light_curve(t, y, dy)
+    _check_phase_range(t, freqs)
     t = np.ascontiguousarray(t, dtype=np.float64)
-    freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
     wx, w_hat, yy = _preprocess_single(y, dy)
 
     power, best_freq, t0, dur, depth, sr = _sbls.sbls_grid(
-        t, wx, w_hat, freqs, float(q_max), int(min_points)
+        t, wx, w_hat, freqs, float(q_max), min_points
     )
     return BLSResult(
         frequency=freqs,
@@ -153,17 +174,27 @@ def eebls(
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required.
+
+    Raises
+    ------
+    ValueError
+        On invalid input (see :func:`sparse_bls`), ``q_min`` outside
+        ``(0, q_max]``, or a non-integer / ``< 1`` ``nbins``.
     """
+    freqs, min_points, nbins = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min, nbins=nbins
+    )
     if nbins is None:
         nbins = auto_nbins(q_min)
+    t, y, dy = _validate_light_curve(t, y, dy)
+    _check_phase_range(t, freqs)
     t = np.ascontiguousarray(t, dtype=np.float64)
-    freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
     tau_arr = np.zeros(1, dtype=np.float64)  # box only
     wx, w_hat, yy = _preprocess_single(y, dy)
 
     power, best_freq, t0, dur, depth, sr, _ = _eebls.eebls_grid(
-        t, wx, w_hat, freqs, int(nbins), float(q_min), float(q_max),
-        int(min_points), tau_arr,
+        t, wx, w_hat, freqs, nbins, float(q_min), float(q_max),
+        min_points, tau_arr,
     )
     return BLSResult(
         frequency=freqs,
@@ -182,6 +213,7 @@ def multiband_sparse_bls(
     frequencies: Array,
     q_max: float = 0.15,
     min_points: int = 3,
+    rescale_errors: bool = False,
 ) -> BLSResult:
     """Multiband Sparse BLS (compiled). See :func:`reference.multiband_sparse_bls_reference`.
 
@@ -200,15 +232,28 @@ def multiband_sparse_bls(
     q_max :
         Maximum transit duration as a fraction of the period.
     min_points :
-        Minimum number of in-transit points required across all bands.
+        Minimum number of in-transit points required across all bands. As in
+        :func:`sparse_bls`, there is no minimum duration (``q_min``).
+    rescale_errors :
+        If True, multiply each band's ``dy`` by ``sqrt(band_chi2_red)`` so its
+        flat-model chi^2/dof is 1 before weighting (bands with a single point or
+        zero scatter are left unchanged, with a warning). Off by default.
+
+    Returns
+    -------
+    BLSResult
+        Includes ``n_bands_used`` (contributing bands per frequency) and
+        ``band_chi2_red`` (per-band reduced chi^2 of the input ``dy``).
     """
+    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    bands, chi2_red = _prepare_bands(bands, rescale_errors)
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
-    freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
+    _check_phase_range(t_all, freqs)
     band_w = np.ascontiguousarray(w_totals, dtype=np.float64)
 
-    power, best_freq, t0, dur, depths, sr = _msbls.msbls_grid(
+    power, best_freq, t0, dur, depths, sr, k_used = _msbls.msbls_grid(
         t_all, wx_all, w_all, band_all, len(labels), freqs,
-        float(q_max), int(min_points), band_w,
+        float(q_max), min_points, band_w,
     )
     return BLSResult(
         frequency=freqs,
@@ -220,6 +265,8 @@ def multiband_sparse_bls(
         best_depth=np.asarray(depths),
         best_power=float(variance_explained(np.array([sr]), chi2_flat)[0]),
         bands=labels,
+        n_bands_used=np.asarray(k_used),
+        band_chi2_red=chi2_red,
     )
 
 
@@ -230,6 +277,7 @@ def multiband_eebls(
     q_min: float = 0.01,
     q_max: float = 0.10,
     min_points: int = 3,
+    rescale_errors: bool = False,
 ) -> BLSResult:
     """Binned multiband BLS (compiled). See :func:`reference.multiband_eebls_reference`.
 
@@ -254,16 +302,22 @@ def multiband_eebls(
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required across all bands.
+    rescale_errors :
+        As in :func:`multiband_sparse_bls`.
     """
+    freqs, min_points, nbins = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min, nbins=nbins
+    )
     if nbins is None:
         nbins = auto_nbins(q_min)
+    bands, chi2_red = _prepare_bands(bands, rescale_errors)
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
-    freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
+    _check_phase_range(t_all, freqs)
     band_w = np.ascontiguousarray(w_totals, dtype=np.float64)
 
-    power, best_freq, t0, dur, depths, sr = _meebls.meebls_grid(
-        t_all, wx_all, w_all, band_all, len(labels), freqs, int(nbins),
-        float(q_min), float(q_max), int(min_points), band_w,
+    power, best_freq, t0, dur, depths, sr, k_used = _meebls.meebls_grid(
+        t_all, wx_all, w_all, band_all, len(labels), freqs, nbins,
+        float(q_min), float(q_max), min_points, band_w,
     )
     return BLSResult(
         frequency=freqs,
@@ -275,4 +329,6 @@ def multiband_eebls(
         best_depth=np.asarray(depths),
         best_power=float(variance_explained(np.array([sr]), chi2_flat)[0]),
         bands=labels,
+        n_bands_used=np.asarray(k_used),
+        band_chi2_red=chi2_red,
     )

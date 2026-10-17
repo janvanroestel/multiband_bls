@@ -39,6 +39,7 @@ __all__ = [
 ]
 
 import logging
+import warnings
 from collections.abc import Mapping
 from typing import cast
 
@@ -55,6 +56,162 @@ Array = npt.NDArray[np.float64]
 # --------------------------------------------------------------------------- #
 # Preprocessing and grids                                                      #
 # --------------------------------------------------------------------------- #
+def _check_weights(dy: Array, where: str) -> None:
+    """Raise unless the inverse-variance weights ``1/dy**2`` are usable.
+
+    Finite, positive ``dy`` can still over/underflow (``1e-200`` -> ``w = inf``,
+    ``1e200`` -> ``w = 0``), which would silently turn the periodogram into NaN.
+    """
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        w = 1.0 / dy ** 2
+        w_sum = w.sum()
+    if not (np.all(np.isfinite(w)) and np.all(w > 0.0)
+            and np.isfinite(w_sum) and w_sum > 0.0):
+        raise ValueError(
+            f"dy{where} spans [{dy.min():.3g}, {dy.max():.3g}], which over/underflows "
+            "the inverse-variance weights 1/dy**2; rescale y and dy."
+        )
+
+
+def _check_signal(y: Array, dy: Array, where: str) -> None:
+    """Raise unless the preprocessed signal and flat-model chi^2 are finite.
+
+    Finite ``y`` can still overflow once mean-subtracted and squared (e.g.
+    ``|y| ~ 1e308``), which would silently turn ``power`` into NaN.
+    """
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore", under="ignore"):
+        w_hat, x_tilde, mu = preprocess(y, dy)
+        wx = w_hat * x_tilde
+        chi2 = float(np.sum((x_tilde / dy) ** 2))
+        yy = float(np.sum(w_hat * x_tilde ** 2))
+    if not (np.isfinite(mu) and np.all(np.isfinite(x_tilde)) and np.all(np.isfinite(wx))
+            and np.isfinite(chi2) and np.isfinite(yy)):
+        raise ValueError(
+            f"y{where} spans [{y.min():.3g}, {y.max():.3g}], which overflows the "
+            "mean-subtracted signal or its chi^2; rescale y and dy."
+        )
+
+
+def _validate_light_curve(
+    t: Array, y: Array, dy: Array, label: str | None = None
+) -> tuple[Array, Array, Array]:
+    """Coerce ``(t, y, dy)`` to 1-D float64 arrays, raising ``ValueError`` on bad input.
+
+    Rejects non-1-D or empty arrays, unequal lengths, non-finite values,
+    ``dy <= 0`` and ``dy`` too extreme for ``1/dy**2``. Bad points are reported,
+    never silently dropped.
+    """
+    where = f" in band {label!r}" if label is not None else ""
+    arrays = {
+        "t": np.asarray(t, dtype=float),
+        "y": np.asarray(y, dtype=float),
+        "dy": np.asarray(dy, dtype=float),
+    }
+    for name, a in arrays.items():
+        if a.ndim != 1:
+            raise ValueError(f"{name}{where} must be 1-D, got shape {a.shape}.")
+    lengths = {name: a.shape[0] for name, a in arrays.items()}
+    if len(set(lengths.values())) != 1:
+        raise ValueError(f"t, y and dy{where} must have equal lengths, got {lengths}.")
+    if lengths["t"] == 0:
+        raise ValueError(f"Empty light curve{where}.")
+    for name, a in arrays.items():
+        n_bad = int(np.count_nonzero(~np.isfinite(a)))
+        if n_bad:
+            raise ValueError(
+                f"{name}{where} contains {n_bad} non-finite value(s); remove them "
+                "(e.g. with np.isfinite) before searching."
+            )
+    n_nonpos = int(np.count_nonzero(arrays["dy"] <= 0.0))
+    if n_nonpos:
+        raise ValueError(f"dy{where} contains {n_nonpos} value(s) <= 0.")
+    _check_weights(arrays["dy"], where)
+    _check_signal(arrays["y"], arrays["dy"], where)
+    return arrays["t"], arrays["y"], arrays["dy"]
+
+
+# Beyond ~1e15 cycles a float64 phase t*f has no fractional precision left
+# (resolution ~0.1 cycle), and far beyond it t*f overflows to inf -> NaN phase ->
+# an invalid bin index in the compiled/GPU cores (bounds checks are off).
+_MAX_PHASE_CYCLES: float = 1e15
+
+# Explicit nbins ceiling: the binned cores allocate O(n_bands * nbins) buffers and
+# sweep O(nbins * kma) windows per frequency, and take nbins as a C int. 1e5 bins
+# resolves q ~ 5e-5 at 5 bins per transit, far beyond any practical search.
+_MAX_NBINS: int = 100_000
+# min_points is a C int in the cores. Any value above the number of points
+# already rejects every window, so capping it here cannot change a result.
+_MAX_C_INT: int = 2**31 - 1
+
+
+def _check_phase_range(t: Array, frequencies: Array) -> None:
+    """Raise unless ``max|t| * max(frequency)`` stays below :data:`_MAX_PHASE_CYCLES`.
+
+    Uses a division so the check itself cannot overflow. ``t`` and
+    ``frequencies`` must already be validated (finite, frequencies > 0).
+    """
+    t_max = float(np.max(np.abs(t)))
+    f_max = float(np.max(frequencies))
+    if t_max > _MAX_PHASE_CYCLES / f_max:
+        raise ValueError(
+            f"max|t| ({t_max:.3g}) * max(frequency) ({f_max:.3g}) exceeds "
+            f"{_MAX_PHASE_CYCLES:.0e} cycles: phases would lose all precision or "
+            "overflow. Subtract a reference epoch from t (e.g. t - t.min())."
+        )
+
+
+def _check_int(name: str, value: object, minimum: int) -> int:
+    """Return ``value`` as an ``int`` if it is an integer ``>= minimum``, else raise."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer, got {value!r}.")
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}.")
+    return int(value)
+
+
+def _check_fraction(name: str, value: object) -> float:
+    """Return ``value`` as a float in the open interval ``(0, 1)``, else raise."""
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number in (0, 1), got {value!r}.") from None
+    if not (np.isfinite(v) and 0.0 < v < 1.0):
+        raise ValueError(f"{name} must be in (0, 1), got {value!r}.")
+    return v
+
+
+def _validate_search_params(
+    frequencies: Array,
+    q_max: float,
+    min_points: int,
+    q_min: float | None = None,
+    nbins: int | None = None,
+) -> tuple[Array, int, int | None]:
+    """Validate the search parameters shared by every entry point.
+
+    Returns ``(frequencies, min_points, nbins)`` as a C-contiguous float64 array
+    and validated ints (``nbins`` stays ``None`` if not given). ``min_points`` is
+    capped at the C-int maximum (larger values reject every window anyway);
+    ``nbins`` above ``_MAX_NBINS`` is rejected before anything is allocated. Must
+    run before :func:`auto_nbins` in the binned entry points.
+    """
+    freqs = np.ascontiguousarray(frequencies, dtype=np.float64)
+    if freqs.ndim != 1 or freqs.shape[0] == 0:
+        raise ValueError(f"frequencies must be a non-empty 1-D array, got shape {freqs.shape}.")
+    if not np.all(np.isfinite(freqs)) or np.any(freqs <= 0.0):
+        raise ValueError("frequencies must be finite and > 0.")
+    q_max_v = _check_fraction("q_max", q_max)
+    if q_min is not None:
+        q_min_v = _check_fraction("q_min", q_min)
+        if q_min_v > q_max_v:
+            raise ValueError(f"q_min ({q_min}) must be <= q_max ({q_max}).")
+    min_points_v = min(_check_int("min_points", min_points, 1), _MAX_C_INT)
+    nbins_v = None if nbins is None else _check_int("nbins", nbins, 1)
+    if nbins_v is not None and nbins_v > _MAX_NBINS:
+        raise ValueError(f"nbins must be <= {_MAX_NBINS}, got {nbins_v}.")
+    return freqs, min_points_v, nbins_v
+
+
 def preprocess(y: Array, dy: Array) -> tuple[Array, Array, float]:
     """Return ``(w_hat, x_tilde, mu)`` from Eqs. 1-2.
 
@@ -68,11 +225,17 @@ def preprocess(y: Array, dy: Array) -> tuple[Array, Array, float]:
     dy :
         1-sigma uncertainties, 1-D float array, same length as ``y``.
     """
+    y = np.asarray(y, dtype=float)
     w = 1.0 / np.asarray(dy, dtype=float) ** 2
     W = w.sum()
     w_hat = w / W
-    mu = float(np.sum(w_hat * np.asarray(y, dtype=float)))
-    x_tilde = np.asarray(y, dtype=float) - mu
+    if y.size and np.all(y == y[0]):
+        # Exactly constant signal: sum(w_hat * y) = y[0] * (1 +- eps) would leave
+        # a ~1e-15 residue in x_tilde and hence a spurious, noise-driven power.
+        mu = float(y[0])
+    else:
+        mu = float(np.sum(w_hat * y))
+    x_tilde = y - mu
     return w_hat, x_tilde, mu
 
 
@@ -116,6 +279,53 @@ def _merge_band_arrays(
     )
 
 
+def _prepare_bands(
+    bands: Mapping[str, tuple[Array, Array, Array]], rescale_errors: bool = False
+) -> tuple[dict[str, tuple[Array, Array, Array]], Array]:
+    """Validate every band and optionally rescale its errors.
+
+    The single validation/rescaling path for all multiband entry points. Returns
+    ``(bands, chi2_red)``: the validated (and, if ``rescale_errors``, rescaled)
+    bands mapping, and the per-band flat-model reduced chi^2
+    ``chi2_red[b] = sum_i (x_tilde/sigma)^2 / (N_b - 1)`` computed from the
+    *original* ``dy`` (NaN for a single-point band).
+
+    With ``rescale_errors``, each band's ``dy`` is multiplied by
+    ``sqrt(chi2_red[b])`` so its flat-model chi^2/dof becomes 1. A band whose
+    ``chi2_red`` is non-finite or ``<= 0`` (one point, or all ``y`` identical) keeps
+    its original ``dy`` and a ``UserWarning`` names it.
+    """
+    if len(bands) == 0:
+        raise ValueError("bands must contain at least one band.")
+    prepared: dict[str, tuple[Array, Array, Array]] = {}
+    chi2_red = np.full(len(bands), np.nan)
+    skipped: list[str] = []
+    for bi, (label, (t_b, y_b, dy_b)) in enumerate(bands.items()):
+        t_v, y_v, dy_v = _validate_light_curve(t_b, y_b, dy_b, label=label)
+        _, x_tilde, _ = preprocess(y_v, dy_v)
+        if t_v.shape[0] > 1:
+            chi2_red[bi] = float(np.sum((x_tilde / dy_v) ** 2)) / (t_v.shape[0] - 1)
+        if rescale_errors:
+            # All-identical y gives chi2_red ~ 1e-28 from rounding, not exactly 0,
+            # so test for zero scatter directly as well.
+            zero_scatter = bool(np.all(y_v == y_v[0]))
+            if not zero_scatter and np.isfinite(chi2_red[bi]) and chi2_red[bi] > 0.0:
+                dy_v = dy_v * np.sqrt(chi2_red[bi])
+                _check_weights(dy_v, f" in band {label!r} (after rescaling)")
+                _check_signal(y_v, dy_v, f" in band {label!r} (after rescaling)")
+            else:
+                skipped.append(str(label))
+        prepared[label] = (t_v, y_v, dy_v)
+    if skipped:
+        warnings.warn(
+            f"rescale_errors: band(s) {skipped} have no usable flat-model chi^2/dof "
+            "(single point or zero scatter); their dy were left unchanged.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return prepared, chi2_red
+
+
 def auto_nbins(q_min: float, n_res: int = 5) -> int:
     """Return the recommended number of phase bins for a given minimum transit fraction.
 
@@ -128,8 +338,30 @@ def auto_nbins(q_min: float, n_res: int = 5) -> int:
         Minimum transit duration as a fraction of the period.
     n_res :
         Minimum number of bins inside the narrowest transit.
+
+    Raises
+    ------
+    ValueError
+        If ``q_min`` is not finite and ``> 0``.
+
+    Warns
+    -----
+    UserWarning
+        If the 500-bin cap means fewer than ``n_res`` bins span ``q_min``
+        (i.e. ``q_min < n_res / 500``); pass an explicit ``nbins`` to override.
     """
-    return int(np.clip(round(n_res / q_min), 50, 500))
+    if not (np.isfinite(q_min) and q_min > 0.0):
+        raise ValueError(f"q_min must be finite and > 0, got {q_min!r}.")
+    wanted = round(n_res / q_min)
+    if wanted > 500:
+        warnings.warn(
+            f"auto_nbins: q_min={q_min} needs {wanted} bins for {n_res} bins per "
+            f"transit, but nbins is capped at 500, giving only {500 * q_min:.2g} "
+            "bins across the narrowest transit. Pass an explicit nbins to override.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return int(np.clip(wanted, 50, 500))
 
 
 def variance_explained(sr2: Array, denom: float) -> Array:
@@ -181,30 +413,47 @@ def build_frequency_grid(
     Raises
     ------
     ValueError
-        If conflicting bounds are given, if ``f_min >= f_max``, or if the time
-        array spans zero baseline.
+        If conflicting bounds are given, if a bound, ``df``, ``oversample`` or
+        ``q_min`` is non-finite or non-positive, if ``f_min >= f_max``, or if the
+        time array is not finite or spans zero baseline.
     """
+    def _positive(name: str, value: float) -> float:
+        v = float(value)
+        if not (np.isfinite(v) and v > 0.0):
+            raise ValueError(f"{name} must be finite and > 0, got {value!r}.")
+        return v
+
     # Convert period bounds → frequency bounds (note the inversion).
     period_given = p_min is not None or p_max is not None
     freq_given = f_min is not None or f_max is not None
     if period_given and freq_given:
         raise ValueError("Provide either (p_min, p_max) or (f_min, f_max), not both.")
     if p_min is not None:
-        f_max = 1.0 / p_min
+        f_max = 1.0 / _positive("p_min", p_min)
     if p_max is not None:
-        f_min = 1.0 / p_max
+        f_min = 1.0 / _positive("p_max", p_max)
 
     if f_min is None or f_max is None:
         raise ValueError("Specify either (f_min, f_max) or (p_min, p_max).")
+    f_min = _positive("f_min", f_min)
+    f_max = _positive("f_max", f_max)
     if f_min >= f_max:
         raise ValueError(f"f_min ({f_min}) must be < f_max ({f_max}).")
+    # validated even when df is given explicitly, so bad values never pass silently
+    q_min = _positive("q_min", q_min)
+    oversample = _positive("oversample", oversample)
 
+    t = np.asarray(t, dtype=float)
+    if t.size == 0 or not np.all(np.isfinite(t)):
+        raise ValueError("t must be a non-empty array of finite times.")
     baseline = float(np.max(t) - np.min(t))
     if baseline <= 0.0:
         raise ValueError("Time array spans zero baseline.")
 
     if df is None:
-        df = float(q_min) / (oversample * baseline)
+        df = q_min / (oversample * baseline)
+    else:
+        df = _positive("df", df)
     return np.arange(f_min, f_max, df)
 
 
@@ -224,12 +473,14 @@ def _transit_fraction(
     p_i1, p_i1m = phi[i1], phi[i1m]
     p_i2, p_i2p = phi[i2], phi[i2p]
 
-    if p_i1m < p_i1:  # neighbour does not wrap past phase 0
+    # Wrap-around is decided by index (phi is sorted), not by comparing values,
+    # so tied phases cannot be mistaken for a wrap.
+    if i1 > 0:  # neighbour does not wrap past phase 0
         phi_ing = 0.5 * (p_i1m + p_i1)
     else:
         phi_ing = 0.5 * (p_i1m + p_i1) - 0.5
 
-    if p_i2 < p_i2p:  # neighbour does not wrap past phase 1
+    if i2p != 0:  # neighbour does not wrap past phase 1
         phi_eg = 0.5 * (p_i2 + p_i2p)
     else:
         phi_eg = 0.5 * (p_i2 + p_i2p) + 0.5
@@ -262,6 +513,8 @@ def _single_period(
     best_depth = 0.0
 
     for i1 in range(n):
+        if phi_sorted[(i1 - 1) % n] == phi_sorted[i1]:
+            continue  # ingress edge would split identical phases
         s = 0.0
         r = 0.0
         cnt = 0
@@ -273,6 +526,8 @@ def _single_period(
             frac, phi_ing = _transit_fraction(phi_sorted, i1, i2, n)
             if frac >= q_max:
                 break
+            if phi_sorted[(i2 + 1) % n] == phi_sorted[i2]:
+                continue  # egress edge would split identical phases
             if cnt < min_points:
                 continue
             denom = r * (1.0 - r)
@@ -311,13 +566,17 @@ def sparse_bls_reference(
         Maximum transit duration as a fraction of the period.
     min_points:
         Minimum number of in-transit points required (paper uses 3).
+
+    Unlike the binned variants there is no minimum duration (``q_min``):
+    ``min_points`` is the only guard against ultra-narrow boxes.
     """
-    t = np.asarray(t, dtype=float)
+    t, y, dy = _validate_light_curve(t, y, dy)
+    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    _check_phase_range(t, freqs)
     w_hat, x_tilde, _ = preprocess(y, dy)
     wx = w_hat * x_tilde
     yy = float(np.sum(w_hat * x_tilde ** 2))  # weighted variance (flat chi^2)
 
-    freqs = np.asarray(frequencies, dtype=float)
     power = np.zeros(freqs.shape[0])
     best = {"sr": 0.0, "t0": 0.0, "dur": 0.0, "depth": 0.0, "idx": 0}
 
@@ -358,8 +617,12 @@ def _multiband_period(
     q_max: float,
     min_points: int,
     band_w: Array,
-) -> tuple[float, float, float, Array]:
-    """Best combined ``(SR, t0, duration, depths[n_bands])`` for one period.
+    band_n: npt.NDArray[np.int64],
+) -> tuple[float, float, float, Array, int]:
+    """Best combined ``(SR, t0, duration, depths[n_bands], k)`` for one period.
+
+    ``k`` is the number of bands contributing to the best window (0 if no
+    window was selected); depths of non-contributing bands are NaN.
 
     A single contiguous phase block (shared across bands) is grown over the
     *merged* phase-sorted samples; each band accumulates its own ``s_b, r_b``
@@ -375,9 +638,12 @@ def _multiband_period(
     best_sr = 0.0
     best_t0 = 0.0
     best_dur = 0.0
-    best_depths = np.zeros(n_bands)
+    best_depths = np.full(n_bands, np.nan)
+    best_k = 0
 
     for i1 in range(n):
+        if phi_sorted[(i1 - 1) % n] == phi_sorted[i1]:
+            continue  # ingress edge would split identical phases
         s = np.zeros(n_bands)
         r = np.zeros(n_bands)
         cnt = np.zeros(n_bands, dtype=np.int64)
@@ -392,29 +658,33 @@ def _multiband_period(
             frac, phi_ing = _transit_fraction(phi_sorted, i1, i2, n)
             if frac >= q_max:
                 break
+            if phi_sorted[(i2 + 1) % n] == phi_sorted[i2]:
+                continue  # egress edge would split identical phases
             if total < min_points:
                 continue
             sr2 = 0.0
-            depths = np.zeros(n_bands)
-            ok = False
+            depths = np.full(n_bands, np.nan)
+            kk = 0
             for bb in range(n_bands):
-                if cnt[bb] < 1:
+                # identifiable only with points both in and out of the window
+                if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
                 if denom <= 0.0:
                     continue
                 sr2 += band_w[bb] * s[bb] * s[bb] / denom
                 depths[bb] = s[bb] / denom
-                ok = True
-            if not ok:
+                kk += 1
+            if kk == 0:
                 continue
             if sr2 > best_sr:
                 best_sr = sr2
                 best_depths = depths
+                best_k = kk
                 best_dur = frac * period
                 phi_mid = (phi_ing + 0.5 * frac) % 1.0
                 best_t0 = phi_mid * period
-    return best_sr, best_t0, best_dur, best_depths
+    return best_sr, best_t0, best_dur, best_depths, best_k
 
 
 def multiband_sparse_bls_reference(
@@ -422,6 +692,7 @@ def multiband_sparse_bls_reference(
     frequencies: Array,
     q_max: float = 0.15,
     min_points: int = 3,
+    rescale_errors: bool = False,
 ) -> BLSResult:
     """Multiband Sparse BLS (pure-Python reference).
 
@@ -439,17 +710,24 @@ def multiband_sparse_bls_reference(
         depth; all bands share the trial period, epoch and duration.
     frequencies, q_max, min_points:
         As in :func:`sparse_bls_reference`.
+    rescale_errors:
+        Rescale each band's ``dy`` so its flat-model chi^2/dof is 1 (see
+        :class:`BLSResult.band_chi2_red`).
     """
+    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    bands, chi2_red = _prepare_bands(bands, rescale_errors)
     t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
+    _check_phase_range(t_all, freqs)
     n_bands = len(labels)
+    band_n = np.bincount(band_all, minlength=n_bands).astype(np.int64)
 
-    freqs = np.asarray(frequencies, dtype=float)
     power = np.zeros(freqs.shape[0])
+    k_used = np.zeros(freqs.shape[0], dtype=np.int64)
     best = {
         "sr": 0.0,
         "t0": 0.0,
         "dur": 0.0,
-        "depths": np.zeros(n_bands),
+        "depths": np.full(n_bands, np.nan),
         "idx": 0,
     }
 
@@ -457,7 +735,7 @@ def multiband_sparse_bls_reference(
         period = 1.0 / f
         phi = (t_all % period) / period
         order = np.argsort(phi)
-        sr, t0, dur, depths = _multiband_period(
+        sr, t0, dur, depths, k = _multiband_period(
             phi[order],
             wx_all[order],
             w_all[order],
@@ -467,8 +745,10 @@ def multiband_sparse_bls_reference(
             q_max,
             min_points,
             band_w,
+            band_n,
         )
         power[idx] = sr
+        k_used[idx] = k
         if sr > cast(float, best["sr"]):
             best.update(sr=sr, t0=t0, dur=dur, depths=depths, idx=idx)
 
@@ -483,6 +763,8 @@ def multiband_sparse_bls_reference(
         best_depth=cast(np.ndarray, best["depths"]),
         best_power=float(variance_explained(np.array([cast(float, best["sr"])]), chi2_flat)[0]),
         bands=labels,
+        n_bands_used=k_used,
+        band_chi2_red=chi2_red,
     )
 
 
@@ -498,8 +780,9 @@ def _meebls_period(
     kma: int,
     min_points: int,
     band_w: Array,
-) -> tuple[float, float, float, Array]:
-    """Best combined ``(SR, t0, duration, depths[n_bands])`` for one period.
+    band_n: npt.NDArray[np.int64],
+) -> tuple[float, float, float, Array, int]:
+    """Best combined ``(SR, t0, duration, depths[n_bands], k)`` for one period.
 
     Binned multiband search: each band is binned onto the same ``nb`` phase bins,
     and a shared window of bins is grown; the combined statistic is
@@ -521,7 +804,8 @@ def _meebls_period(
     best_sr = 0.0
     best_t0 = 0.0
     best_dur = 0.0
-    best_depths = np.zeros(n_bands)
+    best_depths = np.full(n_bands, np.nan)
+    best_k = 0
 
     for i1 in range(nb):
         s = np.zeros(n_bands)
@@ -539,26 +823,28 @@ def _meebls_period(
             if total < min_points:
                 continue
             sr2 = 0.0
-            depths = np.zeros(n_bands)
-            ok = False
+            depths = np.full(n_bands, np.nan)
+            kk = 0
             for bb in range(n_bands):
-                if cnt[bb] < 1:
+                # identifiable only with points both in and out of the window
+                if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
                 if denom <= 0.0:
                     continue
                 sr2 += band_w[bb] * s[bb] * s[bb] / denom
                 depths[bb] = s[bb] / denom
-                ok = True
-            if not ok:
+                kk += 1
+            if kk == 0:
                 continue
             if sr2 > best_sr:
                 best_sr = sr2
                 best_depths = depths
+                best_k = kk
                 best_dur = width / nb * period
                 phi_mid = ((i1 + 0.5 * width) / nb) % 1.0
                 best_t0 = phi_mid * period
-    return best_sr, best_t0, best_dur, best_depths
+    return best_sr, best_t0, best_dur, best_depths, best_k
 
 
 def multiband_eebls_reference(
@@ -568,6 +854,7 @@ def multiband_eebls_reference(
     q_min: float = 0.01,
     q_max: float = 0.10,
     min_points: int = 3,
+    rescale_errors: bool = False,
 ) -> BLSResult:
     """Binned multiband BLS (pure-Python reference).
 
@@ -594,26 +881,36 @@ def multiband_eebls_reference(
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required across all bands.
+    rescale_errors :
+        Rescale each band's ``dy`` so its flat-model chi^2/dof is 1 (see
+        :class:`BLSResult.band_chi2_red`).
     """
+    freqs, min_points, nbins = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min, nbins=nbins
+    )
     if nbins is None:
         nbins = auto_nbins(q_min)
     kmi = max(1, int(q_min * nbins))
     kma = min(nbins, int(q_max * nbins) + 1)
 
+    bands, chi2_red = _prepare_bands(bands, rescale_errors)
     t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
+    _check_phase_range(t_all, freqs)
     n_bands = len(labels)
+    band_n = np.bincount(band_all, minlength=n_bands).astype(np.int64)
 
-    freqs = np.asarray(frequencies, dtype=float)
     power = np.zeros(freqs.shape[0])
-    best = {"sr": 0.0, "t0": 0.0, "dur": 0.0, "depths": np.zeros(n_bands), "idx": 0}
+    k_used = np.zeros(freqs.shape[0], dtype=np.int64)
+    best = {"sr": 0.0, "t0": 0.0, "dur": 0.0, "depths": np.full(n_bands, np.nan), "idx": 0}
 
     for idx, f in enumerate(freqs):
         period = 1.0 / f
-        sr, t0, dur, depths = _meebls_period(
+        sr, t0, dur, depths, k = _meebls_period(
             t_all, wx_all, w_all, band_all, n_bands, period, nbins, kmi, kma,
-            min_points, band_w,
+            min_points, band_w, band_n,
         )
         power[idx] = sr
+        k_used[idx] = k
         if sr > cast(float, best["sr"]):
             best.update(sr=sr, t0=t0, dur=dur, depths=depths, idx=idx)
 
@@ -628,6 +925,8 @@ def multiband_eebls_reference(
         best_depth=cast(np.ndarray, best["depths"]),
         best_power=float(variance_explained(np.array([cast(float, best["sr"])]), chi2_flat)[0]),
         bands=labels,
+        n_bands_used=k_used,
+        band_chi2_red=chi2_red,
     )
 
 
@@ -660,17 +959,20 @@ def eebls_reference(
     min_points:
         Minimum number of in-transit points required.
     """
+    freqs, min_points, nbins = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min, nbins=nbins
+    )
     if nbins is None:
         nbins = auto_nbins(q_min)
     kmi = max(1, int(q_min * nbins))
     kma = min(nbins, int(q_max * nbins) + 1)
 
-    t = np.asarray(t, dtype=float)
+    t, y, dy = _validate_light_curve(t, y, dy)
+    _check_phase_range(t, freqs)
     w_hat, x_tilde, _ = preprocess(y, dy)
     yy = float(np.sum(w_hat * x_tilde ** 2))
     wx = w_hat * x_tilde
 
-    freqs = np.asarray(frequencies, dtype=float)
     power = np.zeros(freqs.shape[0])
     best = {"sr": 0.0, "t0": 0.0, "dur": 0.0, "depth": 0.0, "idx": 0}
 
@@ -702,6 +1004,8 @@ def eebls_reference(
                     continue
                 if cnt < min_points:
                     continue
+                if cnt >= t.shape[0]:
+                    continue  # no out-of-transit point: depth not identifiable
                 denom = r * (1.0 - r)
                 if denom <= 0.0:
                     continue
@@ -743,6 +1047,7 @@ def coadd_bands(
     bands :
         Mapping ``label -> (t, y, dy)``. Each band is mean-subtracted before stacking.
     """
+    bands, _ = _prepare_bands(bands)
     t_parts: list[Array] = []
     y_parts: list[Array] = []
     dy_parts: list[Array] = []

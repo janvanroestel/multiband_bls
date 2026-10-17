@@ -21,7 +21,7 @@ cdef void _single_period(const double* phi, const double* wx, const double* w,
     (wrap-around) run grown from ``i1``.
     """
     cdef Py_ssize_t i1, k, i2, i1m, i2p
-    cdef int cnt
+    cdef cnp.int64_t cnt  # point counts: 64-bit, like the count buffers
     cdef double s, r, frac, phi_ing, phi_eg, denom, sr
     cdef double p_i1, p_i1m, p_i2, p_i2p, phi_mid
     cdef double best_sr = 0.0, best_t0 = 0.0, best_dur = 0.0, best_depth = 0.0
@@ -32,7 +32,13 @@ cdef void _single_period(const double* phi, const double* wx, const double* w,
             i1m += n
         p_i1 = phi[i1]
         p_i1m = phi[i1m]
-        if p_i1m < p_i1:
+        if p_i1m == p_i1:
+            # i1 sits inside a group of identical phases: an ingress edge here
+            # would put points at the same phase both in and out of transit.
+            continue
+        # Wrap-around is decided by index (sorted phases), not by comparing
+        # values, so tied phases cannot be mistaken for a wrap.
+        if i1 > 0:
             phi_ing = 0.5 * (p_i1m + p_i1)
         else:
             phi_ing = 0.5 * (p_i1m + p_i1) - 0.5
@@ -53,7 +59,7 @@ cdef void _single_period(const double* phi, const double* wx, const double* w,
                 i2p -= n
             p_i2 = phi[i2]
             p_i2p = phi[i2p]
-            if p_i2 < p_i2p:
+            if i2p != 0:
                 phi_eg = 0.5 * (p_i2 + p_i2p)
             else:
                 phi_eg = 0.5 * (p_i2 + p_i2p) + 0.5
@@ -62,6 +68,8 @@ cdef void _single_period(const double* phi, const double* wx, const double* w,
             frac -= floor(frac)
             if frac >= q_max:
                 break
+            if p_i2p == p_i2:
+                continue  # egress edge would split identical phases
             if cnt < min_points:
                 continue
             denom = r * (1.0 - r)
