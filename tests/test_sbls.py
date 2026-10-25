@@ -13,11 +13,13 @@ from multiband_bls import (
     build_frequency_grid,
     coadd_bands,
     eebls,
+    eebls_fast,
     eebls_gpu,
     eebls_gpu_fast,
     eebls_reference,
     gpu_available,
     multiband_eebls,
+    multiband_eebls_fast,
     multiband_eebls_gpu,
     multiband_eebls_gpu_fast,
     multiband_eebls_reference,
@@ -470,6 +472,7 @@ _SINGLE_ENTRIES = [
     pytest.param(eebls_reference, True, id="eebls_reference"),
     pytest.param(eebls_gpu, True, id="eebls_gpu", marks=_GPU),
     pytest.param(eebls_gpu_fast, True, id="eebls_gpu_fast", marks=_GPU),
+    pytest.param(eebls_fast, True, id="eebls_fast"),
 ]
 _MULTI_ENTRIES = [
     pytest.param(multiband_sparse_bls, False, id="multiband_sparse_bls"),
@@ -480,6 +483,7 @@ _MULTI_ENTRIES = [
     pytest.param(multiband_eebls_gpu, True, id="multiband_eebls_gpu", marks=_GPU),
     pytest.param(multiband_eebls_gpu_fast, True, id="multiband_eebls_gpu_fast",
                  marks=_GPU),
+    pytest.param(multiband_eebls_fast, True, id="multiband_eebls_fast"),
 ]
 
 
@@ -1173,3 +1177,125 @@ def test_build_frequency_grid_rejects_bad_bounds(kwargs):
 def test_build_frequency_grid_rejects_non_finite_times():
     with pytest.raises(ValueError, match="finite"):
         build_frequency_grid(np.array([0.0, np.nan, 10.0]), f_min=1.0, f_max=2.0)
+
+
+# --------------------------------------------------------------------------- #
+# CPU prefix-sum / log-width search (eebls_fast, multiband_eebls_fast)         #
+# --------------------------------------------------------------------------- #
+def test_cpu_fast_dense_widths_match_exact(lightcurve, freqs):
+    """With dlogq=0 (every integer width) the CPU fast search reproduces the exact
+    binned search on median-centred times to double precision."""
+    bands, _ = lightcurve
+    bands = _centered(bands)
+    t, y, dy = coadd_bands(bands)
+    t = t - np.median(t)
+    exact = eebls(t, y, dy, freqs, nbins=200, q_max=0.12, min_points=3)
+    fast = eebls_fast(t, y, dy, freqs, nbins=200, q_max=0.12, min_points=3, dlogq=0)
+    np.testing.assert_allclose(fast.power, exact.power, rtol=1e-10, atol=1e-13)
+    assert fast.best_frequency == exact.best_frequency
+
+    mexact = multiband_eebls(bands, freqs, nbins=200, q_max=0.12, min_points=3)
+    mfast = multiband_eebls_fast(bands, freqs, nbins=200, q_max=0.12, min_points=3, dlogq=0)
+    np.testing.assert_allclose(mfast.power, mexact.power, rtol=1e-10, atol=1e-13)
+    assert mfast.best_frequency == mexact.best_frequency
+    assert mfast.best_t0 == pytest.approx(mexact.best_t0)
+    np.testing.assert_allclose(mfast.best_depth, mexact.best_depth)
+
+
+def test_cpu_fast_peak_close_to_exact(lightcurve, freqs):
+    """Default log-spaced widths lose at most a few % of the exact peak power and
+    never exceed it."""
+    bands, _ = lightcurve
+    bands = _centered(bands)
+    t, y, dy = coadd_bands(bands)
+    t = t - np.median(t)
+    exact = eebls(t, y, dy, freqs, nbins=300, q_max=0.12)
+    fast = eebls_fast(t, y, dy, freqs, nbins=300, q_max=0.12)
+    assert exact.best_power * 0.90 <= fast.best_power <= exact.best_power * (1 + 1e-12)
+
+    mexact = multiband_eebls(bands, freqs, nbins=300, q_max=0.12)
+    mfast = multiband_eebls_fast(bands, freqs, nbins=300, q_max=0.12)
+    assert mexact.best_power * 0.90 <= mfast.best_power <= mexact.best_power * (1 + 1e-12)
+
+
+def test_cpu_fast_recovers_period(lightcurve, freqs):
+    bands, truth = lightcurve
+    t, y, dy = coadd_bands(bands)
+    res = eebls_fast(t, y, dy, freqs)
+    assert abs(res.best_period - truth.period) / truth.period < 0.01
+    assert 0.0 <= res.best_power <= 1.0
+    mres = multiband_eebls_fast(bands, freqs)
+    assert abs(mres.best_period - truth.period) / truth.period < 0.01
+    assert mres.bands == tuple(bands)
+    assert mres.n_bands_used is None
+
+
+@pytest.mark.parametrize("n_threads", [2, 3, 8])
+def test_cpu_fast_threads_identical(lightcurve, freqs, n_threads):
+    """Splitting the frequency grid over threads gives the identical periodogram."""
+    bands, _ = lightcurve
+    t, y, dy = coadd_bands(bands)
+    one = eebls_fast(t, y, dy, freqs, nbins=200)
+    many = eebls_fast(t, y, dy, freqs, nbins=200, n_threads=n_threads)
+    np.testing.assert_array_equal(many.power, one.power)
+    mone = multiband_eebls_fast(bands, freqs, nbins=200)
+    mmany = multiband_eebls_fast(bands, freqs, nbins=200, n_threads=n_threads)
+    np.testing.assert_array_equal(mmany.power, mone.power)
+
+
+@pytest.mark.parametrize("min_points", [3, 8])
+def test_cpu_fast_count_gate_heteroscedastic(min_points):
+    """min_points is an exact in-transit point count (not a weight sum), as in the
+    exact cores: the zero/non-zero pattern of the periodogram is the same."""
+    rng = np.random.default_rng(23)
+    bands = {}
+    for b, n, sigma in (("u", 15, 0.003), ("g", 100, 0.03), ("r", 100, 0.03)):
+        t = np.sort(rng.uniform(-50.0, 50.0, n))
+        bands[b] = (t, rng.normal(20.0, sigma, n), np.full(n, sigma))
+    bands = _centered(bands)
+    f = np.linspace(0.5, 2.0, 150)
+    exact = multiband_eebls(bands, f, nbins=100, q_max=0.12, min_points=min_points)
+    fast = multiband_eebls_fast(bands, f, nbins=100, q_max=0.12, min_points=min_points, dlogq=0)
+    np.testing.assert_array_equal(fast.power == 0.0, exact.power == 0.0)
+    np.testing.assert_allclose(fast.power, exact.power, rtol=1e-10, atol=1e-13)
+
+
+def test_cpu_fast_rescale_errors(lightcurve, freqs):
+    bands, _ = lightcurve
+    exact = multiband_eebls(bands, freqs, nbins=200, q_max=0.12, rescale_errors=True)
+    fast = multiband_eebls_fast(bands, freqs, nbins=200, q_max=0.12, rescale_errors=True)
+    np.testing.assert_allclose(fast.band_chi2_red, exact.band_chi2_red)
+    assert fast.best_period == pytest.approx(exact.best_period, rel=1e-3)
+
+
+@pytest.mark.parametrize("n_threads", [0, -1, 1.5, True, "2"])
+def test_cpu_fast_rejects_invalid_n_threads(n_threads):
+    t, y, dy = _small_lc()
+    with pytest.raises(ValueError, match="n_threads"):
+        eebls_fast(t, y, dy, _VFREQS, n_threads=n_threads)
+    with pytest.raises(ValueError, match="n_threads"):
+        multiband_eebls_fast({"g": (t, y, dy)}, _VFREQS, n_threads=n_threads)
+
+
+@pytest.mark.parametrize("dlogq", [-0.1, np.nan, np.inf, True, "0.3"])
+def test_cpu_fast_rejects_invalid_dlogq(dlogq):
+    t, y, dy = _small_lc()
+    with pytest.raises(ValueError, match="dlogq"):
+        eebls_fast(t, y, dy, _VFREQS, dlogq=dlogq)
+    with pytest.raises(ValueError, match="dlogq"):
+        multiband_eebls_fast({"g": (t, y, dy)}, _VFREQS, dlogq=dlogq)
+
+
+@_GPU
+def test_cpu_fast_matches_gpu_fast(lightcurve, freqs):
+    """The CPU and GPU fast searches evaluate the same windows: equal periodograms to
+    the GPU's float32 precision."""
+    bands, _ = lightcurve
+    t, y, dy = coadd_bands(bands)
+    cpu = eebls_fast(t, y, dy, freqs, nbins=200, q_max=0.12)
+    gpu = eebls_gpu_fast(t, y, dy, freqs, nbins=200, q_max=0.12)
+    np.testing.assert_allclose(cpu.power, gpu.power, rtol=5e-3, atol=5e-5)
+    mcpu = multiband_eebls_fast(bands, freqs, nbins=200, q_max=0.12)
+    mgpu = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.12)
+    np.testing.assert_allclose(mcpu.power, mgpu.power, rtol=5e-3, atol=5e-5)
+    assert mcpu.best_frequency == pytest.approx(mgpu.best_frequency)

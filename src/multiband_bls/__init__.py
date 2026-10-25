@@ -15,6 +15,10 @@ Quick start::
 All entry points return :class:`BLSResult`.  ``power`` is
 ``Δχ²/χ²_flat ∈ [0, 1]`` (fraction of variance explained).
 
+Without a GPU, :func:`eebls_fast` and :func:`multiband_eebls_fast` run the same
+prefix-sum / log-spaced-width search as the ``*_gpu_fast`` entry points on the
+CPU, optionally multi-threaded (``n_threads``).
+
 GPU acceleration (requires CuPy) is available via :func:`eebls_gpu`,
 :func:`multiband_eebls_gpu`, and their ``_fast`` variants.  Check
 :func:`gpu_available` before use.
@@ -45,7 +49,9 @@ from .reference import (
 try:  # compiled cores are optional until the extension is built
     from .api import (
         eebls,
+        eebls_fast,
         multiband_eebls,
+        multiband_eebls_fast,
         multiband_sparse_bls,
         sparse_bls,
     )
@@ -62,6 +68,14 @@ except ImportError:  # pragma: no cover
     multiband_sparse_bls = multiband_sparse_bls_reference  # type: ignore[assignment]
     eebls = eebls_reference  # type: ignore[assignment]
     multiband_eebls = multiband_eebls_reference  # type: ignore[assignment]
+
+    def _fast_unavailable(*args: object, **kwargs: object) -> BLSResult:
+        raise ImportError(
+            "eebls_fast/multiband_eebls_fast need the compiled Cython cores; "
+            "build with `pip install -e .`."
+        )
+
+    eebls_fast = multiband_eebls_fast = _fast_unavailable  # type: ignore[assignment]
 
 # GPU (CuPy) backends -- import lazily; cupy itself is only needed at call time.
 # When the module can't be imported at all (missing compiled cores), the GPU
@@ -97,6 +111,8 @@ __all__ = [
     "multiband_sparse_bls",
     "eebls",
     "multiband_eebls",
+    "eebls_fast",
+    "multiband_eebls_fast",
     "eebls_gpu",
     "eebls_gpu_fast",
     "multiband_eebls_gpu",
