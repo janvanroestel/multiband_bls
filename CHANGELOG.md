@@ -12,6 +12,9 @@
 
 ### Changed
 
+- **Python 3.9 is no longer supported** (end-of-life since October 2025, and no
+  longer installable on GitHub's Ubuntu 26.04 runners). `requires-python` is now
+  `>=3.10`; CI, the mypy target and the release wheels start at 3.10.
 - The width/grid helpers (`_log_widths`, `_grid_params`, `_check_dlogq`) and the
   best-period refinement (`_result`) moved from `gpu.py` to `api.py`, where both the
   GPU and the new CPU fast entry points use them. `gpu.py` re-imports them, so

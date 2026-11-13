@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Sparse BLS and multiband Sparse BLS for VRO/LSST light curves"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Jan van Roestel", email = "jcjvanroestel@gmail.com" }]
 keywords = ["astronomy", "transit", "BLS", "periodogram", "LSST", "VRO", "eclipsing binary"]
 classifiers = [
@@ -17,7 +17,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Astronomy",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -68,7 +67,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 disallow_untyped_defs = true
 check_untyped_defs = true
 

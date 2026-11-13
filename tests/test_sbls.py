@@ -101,14 +101,14 @@ def test_recovers_injected_period(lightcurve, freqs):
     # within one frequency bin of the truth
     assert abs(mc.best_frequency - 1.0 / truth.period) < 2e-4
     # per-band depths in the right order of magnitude (u deepest, y shallowest)
-    depths = dict(zip(mc.bands, mc.best_depth))
+    depths = dict(zip(mc.bands, mc.best_depth, strict=True))
     assert depths["u"] > depths["y"]
 
 
 def test_multiband_recovers_per_band_depths(lightcurve, freqs):
     bands, truth = lightcurve
     mc = multiband_sparse_bls(bands, freqs, q_max=0.12)
-    for band, depth in zip(mc.bands, mc.best_depth):
+    for band, depth in zip(mc.bands, mc.best_depth, strict=True):
         # generous tolerance: noisy, sparse photometry
         assert depth == pytest.approx(truth.depths[band], abs=0.15 + 0.3 * truth.depths[band])
 
@@ -155,7 +155,7 @@ def test_multiband_eebls_recovers_period(lightcurve, freqs):
     bands, truth = lightcurve
     mc = multiband_eebls(bands, freqs, nbins=200, q_max=0.12)
     assert abs(mc.best_frequency - 1.0 / truth.period) < 2e-4
-    depths = dict(zip(mc.bands, mc.best_depth))
+    depths = dict(zip(mc.bands, mc.best_depth, strict=True))
     assert depths["u"] > depths["y"]  # bluest eclipse deepest
 
 
@@ -710,7 +710,7 @@ def test_unmeasured_band_depth_is_nan(lightcurve):
             bands, freqs, nbins=200, q_max=0.12),
     }
     for name, res in results.items():
-        depths = dict(zip(res.bands, res.best_depth))
+        depths = dict(zip(res.bands, res.best_depth, strict=True))
         assert np.isnan(depths["u"]), name
         assert all(np.isfinite(d) for b, d in depths.items() if b != "u"), name
         assert res.n_bands_used[0] == len(bands) - 1, name
@@ -764,7 +764,7 @@ def test_band_chi2_red_flags_misscaled_band():
     freqs = np.linspace(0.5, 2.0, 20)
     for rescale in (False, True):
         res = multiband_eebls(bands, freqs, nbins=100, rescale_errors=rescale)
-        chi2 = dict(zip(res.bands, res.band_chi2_red))
+        chi2 = dict(zip(res.bands, res.band_chi2_red, strict=True))
         assert chi2["u"] == pytest.approx(4.0, rel=0.2)   # pre-rescaling value
         assert chi2["g"] == pytest.approx(1.0, rel=0.2)
         assert chi2["r"] == pytest.approx(1.0, rel=0.2)
@@ -979,7 +979,7 @@ def test_band_without_baseline_is_not_measured():
                    (multiband_eebls, {"nbins": 200}),
                    (multiband_eebls_reference, {"nbins": 200})):
         res = fn(bands, freqs, q_max=0.1, **kw)
-        depths = dict(zip(res.bands, res.best_depth))
+        depths = dict(zip(res.bands, res.best_depth, strict=True))
         assert np.isnan(depths["u"]), fn.__name__
         assert depths["g"] == pytest.approx(0.5, abs=0.05), fn.__name__
         assert res.n_bands_used[0] == 1, fn.__name__
