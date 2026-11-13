@@ -24,13 +24,22 @@ __all__ = [
 ]
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 
-from .api import _merge_bands, _preprocess_single, eebls, multiband_eebls
+from .api import (
+    _check_dlogq,
+    _grid_params,
+    _log_widths,
+    _merge_bands,
+    _preprocess_single,
+    _result,
+    eebls,
+    multiband_eebls,
+)
 from .periodogram import BLSResult
 from .reference import (
     _check_phase_range,
@@ -38,7 +47,6 @@ from .reference import (
     _validate_light_curve,
     _validate_search_params,
     auto_nbins,
-    variance_explained,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,15 +101,6 @@ def _check_fast_float32(t_centered: Array, frequencies: Array, name: str) -> Non
             "loses accuracy; use the exact GPU entry point."
         )
 
-
-def _check_dlogq(dlogq: float, name: str) -> float:
-    """Return ``dlogq`` as a float; raise unless it is a finite real number >= 0."""
-    if isinstance(dlogq, bool) or not isinstance(dlogq, (int, float, np.integer, np.floating)):
-        raise ValueError(f"{name}: dlogq must be a real number, got {dlogq!r}.")
-    dlogq = float(dlogq)
-    if not (np.isfinite(dlogq) and dlogq >= 0.0):
-        raise ValueError(f"{name}: dlogq must be finite and >= 0, got {dlogq!r}.")
-    return dlogq
 
 # --------------------------------------------------------------------------- #
 # CUDA kernels                                                                 #
@@ -614,63 +613,6 @@ def _split_time(t: Array) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float
     t_hi = t64.astype(np.float32)
     t_lo = (t64 - t_hi.astype(np.float64)).astype(np.float32)
     return t_hi, t_lo
-
-
-def _log_widths(kmi: int, kma: int, dlogq: float = 0.3) -> np.ndarray:
-    """Geometrically-spaced integer window widths between kmi and kma (inclusive).
-
-    Reduces window evaluations from O(kma - kmi) to O(log(kma/kmi) / log(1+dlogq)).
-    Smaller dlogq = more widths = higher fidelity but slower.
-    """
-    from math import ceil
-
-    widths: set[int] = set()
-    w = kmi
-    while w <= kma:
-        widths.add(w)
-        w = max(w + 1, ceil(w * (1.0 + dlogq)))
-    widths.add(kma)
-    return np.array(sorted(widths), dtype=np.int32)
-
-
-def _grid_params(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
-    kmi = max(1, int(q_min * nbins))
-    kma = min(nbins, int(q_max * nbins) + 1)
-    # Load-bearing invariant: every kernel wraps the circular window with a single
-    # subtraction (`if (jj >= nb) jj -= nb`), which is only correct when the widest
-    # window (kma) does not exceed nbins. Violating this would silently read/write
-    # out of bounds in shared memory. Raise (not assert) so `python -O` keeps it.
-    if kma > nbins:
-        raise ValueError(f"kma ({kma}) must not exceed nbins ({nbins})")
-    return kmi, kma
-
-
-def _result(
-    power_raw: np.ndarray,
-    chi2_flat: float,
-    frequencies: np.ndarray,
-    refine_fn: Callable[[float], BLSResult],
-    bands: tuple[str, ...] | None = None,
-    band_chi2_red: Array | None = None,
-    n_bands_used: npt.NDArray[np.int64] | None = None,
-) -> BLSResult:
-    power = variance_explained(power_raw, chi2_flat)
-    best_idx = int(np.argmax(power))
-    best_freq = float(frequencies[best_idx])
-    ref = refine_fn(best_freq)
-    return BLSResult(
-        frequency=frequencies,
-        power=power,
-        best_frequency=best_freq,
-        best_period=1.0 / best_freq,
-        best_t0=ref.best_t0,
-        best_duration=ref.best_duration,
-        best_depth=ref.best_depth,
-        best_power=float(power[best_idx]),
-        bands=bands,
-        n_bands_used=n_bands_used,
-        band_chi2_red=band_chi2_red,
-    )
 
 
 def eebls_gpu(

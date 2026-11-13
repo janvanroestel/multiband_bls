@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `eebls_fast` and `multiband_eebls_fast`: CPU counterparts of the `*_gpu_fast`
+  entry points (prefix-sum phase bins, log-spaced widths via `dlogq`) in a new
+  Cython core `_fast.pyx`, in double precision. The frequency loop runs without the
+  GIL, and `n_threads` splits the grid over threads. With `dlogq=0` the periodogram
+  equals `eebls` / `multiband_eebls` on median-centred times.
+
+### Changed
+
+- The width/grid helpers (`_log_widths`, `_grid_params`, `_check_dlogq`) and the
+  best-period refinement (`_result`) moved from `gpu.py` to `api.py`, where both the
+  GPU and the new CPU fast entry points use them. `gpu.py` re-imports them, so
+  `multiband_bls.gpu._log_widths` etc. still work.
+
 ## [0.1.0] — 2026-10-17
 
 Initial release.

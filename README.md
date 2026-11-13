@@ -50,7 +50,7 @@ down-weight exactly the bands with the strongest eclipses; use it with care.
 
 | Backend | Functions | Requirement |
 |---|---|---|
-| **Cython (CPU)** | `sparse_bls`, `eebls`, `multiband_sparse_bls`, `multiband_eebls` | C compiler, Cython ≥ 3 |
+| **Cython (CPU)** | `sparse_bls`, `eebls`, `multiband_sparse_bls`, `multiband_eebls`, `eebls_fast`, `multiband_eebls_fast` | C compiler, Cython ≥ 3 |
 | **CUDA (GPU)** | `eebls_gpu`, `eebls_gpu_fast`, `multiband_eebls_gpu`, `multiband_eebls_gpu_fast` | CuPy + CUDA GPU |
 | Pure Python (reference) | `sparse_bls_reference`, `eebls_reference`, `multiband_sparse_bls_reference`, `multiband_eebls_reference` | NumPy only |
 
@@ -167,6 +167,7 @@ if gpu_available():
 |---|---|---|
 | `multiband_sparse_bls(bands, freqs, q_max, min_points, rescale_errors)` | Cython | unbinned multiband BLS |
 | `multiband_eebls(bands, freqs, nbins, q_min, q_max, min_points, rescale_errors)` | Cython | binned multiband BLS |
+| `multiband_eebls_fast(bands, freqs, nbins, ..., dlogq, n_threads)` | Cython | prefix-sum + log-spaced widths, multi-threaded |
 | `multiband_eebls_gpu(bands, freqs, nbins, ...)` | CUDA | binned multiband BLS, GPU |
 | `multiband_eebls_gpu_fast(bands, freqs, nbins, ...)` | CUDA | float32 + warp-shuffle variant |
 | `multiband_sparse_bls_reference(...)`, `multiband_eebls_reference(...)` | Python | reference oracle |
@@ -181,6 +182,7 @@ binned functions.
 |---|---|---|
 | `sparse_bls(t, y, dy, freqs, q_max, min_points)` | Cython | unbinned BLS |
 | `eebls(t, y, dy, freqs, nbins, q_min, q_max, min_points)` | Cython | binned BLS |
+| `eebls_fast(t, y, dy, freqs, nbins, ..., dlogq, n_threads)` | Cython | prefix-sum + log-spaced widths, multi-threaded |
 | `eebls_gpu(t, y, dy, freqs, nbins, ...)` | CUDA | binned BLS, GPU |
 | `eebls_gpu_fast(t, y, dy, freqs, nbins, ..., dlogq)` | CUDA | float32 + warp-shuffle variant |
 | `sparse_bls_reference(...)`, `eebls_reference(...)` | Python | reference oracle |
@@ -251,12 +253,33 @@ frequencies. We thank
 
 `gpu_available()` returns `True` if a usable CUDA GPU is detected.
 
+## Fast CPU search
+
+`eebls_fast` and `multiband_eebls_fast` run the same search as the `*_gpu_fast`
+kernels on the CPU, for machines without a GPU (e.g. CPU clusters). The phase bins
+are turned into prefix sums and only the log-spaced widths (`dlogq`, default 0.3)
+are evaluated, so a frequency costs `O(N + nbins · n_widths)` instead of the
+`O(N + nbins · kma)` of `eebls` / `multiband_eebls`. Unlike the GPU kernels, all sums
+are double precision. Times are median-centred before folding (as on the GPU), so with
+`dlogq=0` the periodogram equals `eebls` / `multiband_eebls` on median-centred times.
+The best period's `t0`/duration/depths are recomputed exactly at that frequency.
+`multiband_eebls_fast` does not fill `n_bands_used`.
+
+The whole frequency loop runs without the GIL; `n_threads` (default 1) splits the
+frequency grid over that many threads. Folding the points sets a floor on the cost
+(~2.5 ns per point per frequency), so the gain over `eebls` / `multiband_eebls` is
+largest for wide `q` ranges and many bins.
+
 ## Performance
 
 * Cython cores are ~300–400× faster than the pure-Python reference.
 * GPU (`multiband_eebls_gpu`) is **~13× faster** than the Cython core on a laptop
   RTX 3050 Ti (4.4 s vs 56 s for a 221k-frequency multiband search); substantially
   more on a datacenter GPU.
+* `multiband_eebls_fast` on a 2-band ZTF light curve (2,277 points, 494k
+  frequencies, 185 bins, widths 3–27 bins): 6.9 s on one thread and 1.3 s on 8 threads,
+  versus 14.7 s for `multiband_eebls` and 0.2 s for `multiband_eebls_gpu_fast` on a
+  laptop RTX 3050 Ti.
 * Period recovery agrees with `astropy.timeseries.BoxLeastSquares`; SBLS pins the
   frequency more precisely because it places box edges at observed phases rather
   than on a fixed grid.

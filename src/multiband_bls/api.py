@@ -2,6 +2,9 @@
 
 - :func:`sparse_bls` / :func:`multiband_sparse_bls` — unbinned, O(N²/freq), precise
 - :func:`eebls` / :func:`multiband_eebls` — phase-binned, O(N/freq), fast for large N
+- :func:`eebls_fast` / :func:`multiband_eebls_fast` — phase-binned with prefix sums and
+  log-spaced widths (the CPU counterparts of the ``*_gpu_fast`` entry points), optionally
+  multi-threaded; for large frequency grids on machines without a GPU
 
 All functions return :class:`~multiband_bls.BLSResult` with
 ``power = Δχ²/χ²_flat ∈ [0, 1]`` (fraction of variance explained, maximised at
@@ -11,15 +14,23 @@ the best period). Drop-in replacements for the reference implementations in
 
 from __future__ import annotations
 
-__all__ = ["sparse_bls", "eebls", "multiband_sparse_bls", "multiband_eebls"]
+__all__ = [
+    "sparse_bls",
+    "eebls",
+    "multiband_sparse_bls",
+    "multiband_eebls",
+    "eebls_fast",
+    "multiband_eebls_fast",
+]
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import numpy.typing as npt
 
-from . import _eebls, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
+from . import _eebls, _fast, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
 from .periodogram import BLSResult
 from .reference import (
     _check_phase_range,
@@ -332,3 +343,223 @@ def multiband_eebls(
         n_bands_used=np.asarray(k_used),
         band_chi2_red=chi2_red,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Prefix-sum / log-width helpers, shared with the fast GPU entry points        #
+# --------------------------------------------------------------------------- #
+def _check_dlogq(dlogq: float, name: str) -> float:
+    """Return ``dlogq`` as a float; raise unless it is a finite real number >= 0."""
+    if isinstance(dlogq, bool) or not isinstance(dlogq, (int, float, np.integer, np.floating)):
+        raise ValueError(f"{name}: dlogq must be a real number, got {dlogq!r}.")
+    dlogq = float(dlogq)
+    if not (np.isfinite(dlogq) and dlogq >= 0.0):
+        raise ValueError(f"{name}: dlogq must be finite and >= 0, got {dlogq!r}.")
+    return dlogq
+
+
+
+def _log_widths(kmi: int, kma: int, dlogq: float = 0.3) -> np.ndarray:
+    """Geometrically-spaced integer window widths between kmi and kma (inclusive).
+
+    Reduces window evaluations from O(kma - kmi) to O(log(kma/kmi) / log(1+dlogq)).
+    Smaller dlogq = more widths = higher fidelity but slower.
+    """
+    from math import ceil
+
+    widths: set[int] = set()
+    w = kmi
+    while w <= kma:
+        widths.add(w)
+        w = max(w + 1, ceil(w * (1.0 + dlogq)))
+    widths.add(kma)
+    return np.array(sorted(widths), dtype=np.int32)
+
+
+def _grid_params(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
+    kmi = max(1, int(q_min * nbins))
+    kma = min(nbins, int(q_max * nbins) + 1)
+    # Load-bearing invariant: every kernel wraps the circular window with a single
+    # subtraction (`if (jj >= nb) jj -= nb`), which is only correct when the widest
+    # window (kma) does not exceed nbins. Violating this would silently read/write
+    # out of bounds in shared memory. Raise (not assert) so `python -O` keeps it.
+    if kma > nbins:
+        raise ValueError(f"kma ({kma}) must not exceed nbins ({nbins})")
+    return kmi, kma
+
+
+def _result(
+    power_raw: np.ndarray,
+    chi2_flat: float,
+    frequencies: np.ndarray,
+    refine_fn: Callable[[float], BLSResult],
+    bands: tuple[str, ...] | None = None,
+    band_chi2_red: Array | None = None,
+    n_bands_used: npt.NDArray[np.int64] | None = None,
+) -> BLSResult:
+    power = variance_explained(power_raw, chi2_flat)
+    best_idx = int(np.argmax(power))
+    best_freq = float(frequencies[best_idx])
+    ref = refine_fn(best_freq)
+    return BLSResult(
+        frequency=frequencies,
+        power=power,
+        best_frequency=best_freq,
+        best_period=1.0 / best_freq,
+        best_t0=ref.best_t0,
+        best_duration=ref.best_duration,
+        best_depth=ref.best_depth,
+        best_power=float(power[best_idx]),
+        bands=bands,
+        n_bands_used=n_bands_used,
+        band_chi2_red=band_chi2_red,
+    )
+
+
+def _check_n_threads(n_threads: int, name: str) -> int:
+    """Return ``n_threads`` as an int; raise unless it is an integer >= 1."""
+    if isinstance(n_threads, bool) or not isinstance(n_threads, (int, np.integer)) or n_threads < 1:
+        raise ValueError(f"{name}: n_threads must be an integer >= 1, got {n_threads!r}.")
+    return int(n_threads)
+
+
+def _threaded_grid(kernel: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]],
+                   freqs: npt.NDArray[np.float64], n_threads: int) -> npt.NDArray[np.float64]:
+    """Run ``kernel(freq_chunk) -> power_chunk`` over ``freqs``, split over threads.
+
+    The ``_fast`` Cython cores release the GIL for their whole frequency loop, so
+    the chunks run in parallel. Four chunks per thread even out uneven chunk costs.
+    """
+    if n_threads == 1 or freqs.size < 2 * n_threads:
+        return kernel(freqs)
+    chunks = np.array_split(freqs, 4 * n_threads)
+    with ThreadPoolExecutor(n_threads) as pool:
+        return np.concatenate(list(pool.map(kernel, chunks)))
+
+
+def eebls_fast(
+    t: Array,
+    y: Array,
+    dy: Array,
+    frequencies: Array,
+    nbins: int | None = None,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
+    min_points: int = 3,
+    dlogq: float = 0.3,
+    n_threads: int = 1,
+) -> BLSResult:
+    """Fast CPU binned BLS using prefix-sum bins and log-spaced transit widths.
+
+    The CPU counterpart of :func:`multiband_bls.eebls_gpu_fast`: the phase bins are
+    turned into cumulative sums, so each window sum is an O(1) difference, and only
+    a geometrically-spaced subset of widths between ``q_min`` and ``q_max`` is
+    evaluated. Per frequency this costs ``O(N + nbins * n_widths)`` instead of the
+    ``O(N + nbins * kma)`` of :func:`eebls`, which dominates for large ``nbins`` and
+    wide ``q`` ranges.
+
+    Parameters
+    ----------
+    t, y, dy, frequencies, nbins, q_min, q_max, min_points :
+        As in :func:`eebls`.
+    dlogq :
+        Logarithmic width spacing, as in :func:`multiband_bls.eebls_gpu_fast`.
+        ``dlogq=0`` evaluates every integer width (same windows as :func:`eebls`).
+    n_threads :
+        Number of threads the frequency grid is split over (default 1).
+
+    Notes
+    -----
+    Times are median-centred before folding (like the fast GPU kernels), so the
+    phase bins start at a different phase than in :func:`eebls`; with ``dlogq=0``
+    the periodogram equals :func:`eebls` run on median-centred times. All sums are
+    double precision. ``best_t0``/``best_duration``/``best_depth`` are recomputed
+    exactly with :func:`eebls` at the best frequency (on the original times), while
+    ``power``/``best_power`` are this search's values.
+    """
+    freqs, min_points, nbins = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min, nbins=nbins
+    )
+    if nbins is None:
+        nbins = auto_nbins(q_min)
+    t, y, dy = _validate_light_curve(t, y, dy)
+    _check_phase_range(t, freqs)
+    dlogq = _check_dlogq(dlogq, "eebls_fast")
+    n_threads = _check_n_threads(n_threads, "eebls_fast")
+    wx, w_hat, yy = _preprocess_single(y, dy)
+    tc = np.ascontiguousarray(t - np.median(t), dtype=np.float64)
+    kmi, kma = _grid_params(nbins, q_min, q_max)
+    widths = np.ascontiguousarray(_log_widths(kmi, kma, dlogq), dtype=np.int32)
+    mp = min(min_points, t.shape[0] + 1)
+
+    def kernel(f: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        return _fast.eebls_fast_grid(tc, wx, w_hat, np.ascontiguousarray(f), nbins, widths, mp)
+
+    power = _threaded_grid(kernel, freqs, n_threads)
+    return _result(power, yy, freqs,
+                   lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
+                                    q_min=q_min, q_max=q_max, min_points=min_points))
+
+
+def multiband_eebls_fast(
+    bands: Mapping[str, tuple[Array, Array, Array]],
+    frequencies: Array,
+    nbins: int | None = None,
+    q_min: float = 0.01,
+    q_max: float = 0.10,
+    min_points: int = 3,
+    dlogq: float = 0.3,
+    rescale_errors: bool = False,
+    n_threads: int = 1,
+) -> BLSResult:
+    """Fast CPU binned multiband BLS using prefix-sum bins and log-spaced widths.
+
+    The CPU counterpart of :func:`multiband_bls.multiband_eebls_gpu_fast`; see
+    :func:`eebls_fast` for the design. Each band keeps its own baseline and depth;
+    all bands share the trial period, epoch and duration.
+
+    Parameters
+    ----------
+    bands, frequencies, nbins, q_min, q_max, min_points, rescale_errors :
+        As in :func:`multiband_eebls`.
+    dlogq :
+        Logarithmic width spacing, as in :func:`multiband_bls.multiband_eebls_gpu_fast`.
+    n_threads :
+        Number of threads the frequency grid is split over (default 1).
+
+    Notes
+    -----
+    As in :func:`eebls_fast`: median-centred times, double-precision sums, and the
+    best period's ``t0``/duration/depths recomputed exactly with
+    :func:`multiband_eebls`. ``min_points`` is an exact total in-transit count over
+    all bands, and a band contributes only with >= 1 point in and out of the window
+    (same semantics as :func:`multiband_eebls`). ``n_bands_used`` is not computed
+    (``None``).
+    """
+    freqs, min_points, nbins = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min, nbins=nbins
+    )
+    if nbins is None:
+        nbins = auto_nbins(q_min)
+    bands, chi2_red = _prepare_bands(bands, rescale_errors)
+    dlogq = _check_dlogq(dlogq, "multiband_eebls_fast")
+    n_threads = _check_n_threads(n_threads, "multiband_eebls_fast")
+    t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
+    _check_phase_range(t_all, freqs)
+    tc = np.ascontiguousarray(t_all - np.median(t_all), dtype=np.float64)
+    band_w = np.ascontiguousarray(w_totals, dtype=np.float64)
+    kmi, kma = _grid_params(nbins, q_min, q_max)
+    widths = np.ascontiguousarray(_log_widths(kmi, kma, dlogq), dtype=np.int32)
+    mp = min(min_points, t_all.shape[0] + 1)
+
+    def kernel(f: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        return _fast.meebls_fast_grid(tc, wx_all, w_all, band_all, len(labels),
+                                      np.ascontiguousarray(f), nbins, widths, mp, band_w)
+
+    power = _threaded_grid(kernel, freqs, n_threads)
+    # bands were already rescaled above: refine on them without rescaling again
+    return _result(power, chi2_flat, freqs,
+                   lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
+                                              q_min=q_min, q_max=q_max,
+                                              min_points=min_points),
+                   bands=labels, band_chi2_red=chi2_red)

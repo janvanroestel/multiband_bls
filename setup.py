@@ -37,6 +37,13 @@ extensions = [
         extra_compile_args=COMPILE_ARGS,
         define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
     ),
+    Extension(
+        "multiband_bls._fast",
+        ["src/multiband_bls/_fast.pyx"],
+        include_dirs=[np.get_include()],
+        extra_compile_args=COMPILE_ARGS,
+        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
+    ),
 ]
 
 setup(
