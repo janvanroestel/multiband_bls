@@ -9,9 +9,34 @@
   Cython core `_fast.pyx`, in double precision. The frequency loop runs without the
   GIL, and `n_threads` splits the grid over threads. With `dlogq=0` the periodogram
   equals `eebls` / `multiband_eebls` on median-centred times.
+- Opt-in coarse-to-fine frequency search for `eebls_fast`, `multiband_eebls_fast`,
+  `eebls_gpu_fast` and `multiband_eebls_gpu_fast` (`coarse_factor`, `n_refine`;
+  default `coarse_factor=1` = full grid). Every `coarse_factor`-th frequency is
+  searched, then the full grid around the `n_refine` highest separated coarse peaks,
+  cutting the work by roughly `coarse_factor`. Only meaningful on a grid oversampled
+  by at least `coarse_factor` (3 by default from `build_frequency_grid`); it can miss
+  weak or narrow peaks, so validate recovery against the full grid first. In 60 random
+  injections (4 bands x 60 points) `coarse_factor` 2-4 recovered all 26 signals the
+  full grid recovered, at 2.0-3.8x the speed. `n_bands_used` is `None` for
+  `multiband_eebls_gpu_fast` with `coarse_factor > 1`.
 
 ### Changed
 
+- CPU fast cores (`_fast.pyx`): the per-frequency fold/bin/prefix-sum and window sweep
+  are now plain C in `_fast_kernels.h`. The sweep lists the start bins passing the
+  `min_points` gate first and evaluates the statistic only on those; there is no
+  wrap-around branch in the window sums; the phase fold is a separate vectorised
+  pass (int32 truncation, guarded at `max|t| * max(f) < 2**30`); and the window
+  evaluators are AVX2-multiversioned on x86-64 Linux/GCC. Powers agree with the
+  previous implementation to ~1e-15. Interleaved single-thread A/B: 0.9-1.4x
+  (best for many sparse bands, 1.1-1.25x for dense light curves).
+- `multiband_eebls_gpu_fast`: for `nbins < 224` the sweep distributes the
+  (start, width) pairs over all threads (1.05-1.7x faster for small `nbins`, e.g.
+  1.24x at `nbins=100`; unchanged above). Powers and `n_bands_used` are unchanged.
+
+- **Python 3.9 is no longer supported** (end-of-life since October 2025, and no
+  longer installable on GitHub's Ubuntu 26.04 runners). `requires-python` is now
+  `>=3.10`; CI, the mypy target and the release wheels start at 3.10.
 - The width/grid helpers (`_log_widths`, `_grid_params`, `_check_dlogq`) and the
   best-period refinement (`_result`) moved from `gpu.py` to `api.py`, where both the
   GPU and the new CPU fast entry points use them. `gpu.py` re-imports them, so

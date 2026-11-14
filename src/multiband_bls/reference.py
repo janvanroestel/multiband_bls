@@ -454,7 +454,7 @@ def build_frequency_grid(
         df = q_min / (oversample * baseline)
     else:
         df = _positive("df", df)
-    return np.arange(f_min, f_max, df)
+    return np.arange(f_min, f_max, df, dtype=np.float64)
 
 
 # --------------------------------------------------------------------------- #

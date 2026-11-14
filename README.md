@@ -61,7 +61,7 @@ pip install -e .            # builds the four Cython extension modules
 pip install -e '.[test]'    # + pytest, astropy (for the test suite)
 ```
 
-Prebuilt wheels target Linux x86-64, CPython 3.9–3.13. On other platforms `pip`
+Prebuilt wheels target Linux x86-64, CPython 3.10–3.13. On other platforms `pip`
 builds from the source distribution, which needs a C compiler (the build always
 compiles the Cython cores; Windows is untested). If the compiled cores cannot be
 imported — e.g. when running from a source checkout without building — the four
