@@ -32,8 +32,8 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.23
         env:
-          # requires-python is >=3.9, so ship 3.9 wheels too (the GPU env runs 3.9).
-          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
+          # One wheel per CPython version allowed by requires-python (>=3.10).
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
           CIBW_ARCHS_LINUX: x86_64
           # Current NumPy (a build requirement) ships no manylinux2014 wheels and its
           # source build needs GCC >= 10.3, newer than the manylinux2014 toolchain.
