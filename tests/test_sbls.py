@@ -1299,3 +1299,167 @@ def test_cpu_fast_matches_gpu_fast(lightcurve, freqs):
     mgpu = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.12)
     np.testing.assert_allclose(mcpu.power, mgpu.power, rtol=5e-3, atol=5e-5)
     assert mcpu.best_frequency == pytest.approx(mgpu.best_frequency)
+
+
+# --------------------------------------------------------------------------- #
+# CPU fast cores: wrap-around / gate edge cases of the C window sweep          #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("nbins,q_max", [(20, 0.99), (7, 0.99), (50, 0.5)])
+@pytest.mark.parametrize("min_points", [1, 3])
+def test_cpu_fast_full_width_and_wrap_match_exact(nbins, q_max, min_points):
+    """Widths up to nbins (windows covering the whole circle, every start wrapping)
+    on a sparse light curve, where most windows are empty or fail the count gate."""
+    rng = np.random.default_rng(5)
+    n = 25
+    t = np.sort(rng.uniform(-30.0, 30.0, n))
+    y = 20.0 + rng.normal(0.0, 0.05, n) + 0.2 * (np.abs(((t / 0.8) % 1.0) - 0.5) < 0.1)
+    dy = np.full(n, 0.05)
+    f = np.linspace(0.3, 3.0, 120)
+    t = t - np.median(t)
+    exact = eebls(t, y, dy, f, nbins=nbins, q_min=1.0 / nbins, q_max=q_max,
+                  min_points=min_points)
+    fast = eebls_fast(t, y, dy, f, nbins=nbins, q_min=1.0 / nbins, q_max=q_max,
+                      min_points=min_points, dlogq=0)
+    np.testing.assert_allclose(fast.power, exact.power, rtol=1e-10, atol=1e-13)
+
+    bands = {"a": (t, y, dy), "b": (t + 0.013, y + 0.01, dy),
+             "c": (t[::2], y[::2], dy[::2])}
+    mexact = multiband_eebls(bands, f, nbins=nbins, q_min=1.0 / nbins, q_max=q_max,
+                             min_points=min_points)
+    mfast = multiband_eebls_fast(bands, f, nbins=nbins, q_min=1.0 / nbins, q_max=q_max,
+                                 min_points=min_points, dlogq=0)
+    np.testing.assert_allclose(mfast.power, mexact.power, rtol=1e-10, atol=1e-13)
+
+
+def test_cpu_fast_rejects_int32_phase_overflow_in_core():
+    """The vectorised fold truncates t * f to int32; the core refuses larger phases
+    (the public entry points already stop at 1e8 cycles)."""
+    from multiband_bls import _fast
+
+    t = np.array([0.0, 1.0e9, -1.0e9])
+    wx = np.zeros(3)
+    w = np.full(3, 1.0 / 3.0)
+    with pytest.raises(ValueError, match=r"2\*\*30"):
+        _fast.eebls_fast_grid(t, wx, w, np.array([5.0]), 50, np.array([2], dtype=np.int32), 1)
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in coarse-to-fine frequency search                                       #
+# --------------------------------------------------------------------------- #
+def test_coarse_to_fine_helper_unit():
+    from multiband_bls.api import _coarse_to_fine
+
+    f = np.linspace(1.0, 2.0, 1001)
+    calls: list[int] = []
+
+    def evaluate(x):
+        calls.append(len(x))
+        peak = lambda x0: np.exp(-0.5 * ((x - x0) / 0.004) ** 2)  # noqa: E731
+        return peak(1.37) + 0.1 * peak(1.8)
+
+    full = evaluate(f)
+    calls.clear()
+    out = _coarse_to_fine(evaluate, f, 4, 3)
+    assert out.shape == f.shape
+    assert sum(calls) < 0.5 * f.size
+    # the maximum is an exactly evaluated point and equals the full-grid maximum
+    assert out.max() == full.max() and np.argmax(out) == np.argmax(full)
+    assert np.all(out <= full.max() + 1e-15)
+    # coarse_factor=1 and tiny grids fall back to a single full evaluation
+    np.testing.assert_array_equal(_coarse_to_fine(evaluate, f, 1, 5), full)
+    np.testing.assert_array_equal(_coarse_to_fine(evaluate, f[:10], 4, 5), evaluate(f[:10]))
+
+
+@pytest.mark.parametrize("bad", [0, -2, 1.5, True, "3"])
+def test_coarse_params_validated(bad):
+    t, y, dy = _small_lc()
+    for kw in ({"coarse_factor": bad}, {"n_refine": bad}):
+        with pytest.raises(ValueError, match=r"coarse_factor|n_refine"):
+            eebls_fast(t, y, dy, _VFREQS, **kw)
+        with pytest.raises(ValueError, match=r"coarse_factor|n_refine"):
+            multiband_eebls_fast({"g": (t, y, dy)}, _VFREQS, **kw)
+
+
+@pytest.fixture
+def oversampled_freqs(lightcurve):
+    """A properly oversampled grid (3 samples per peak width) around the signal: the
+    coarse-to-fine search is only meaningful when skipping samples does not step over
+    a peak (the ``freqs`` fixture's step exceeds the peak width)."""
+    bands, truth = lightcurve
+    t_all = np.concatenate([b[0] for b in bands.values()])
+    return build_frequency_grid(t_all, p_min=0.99 * truth.period, p_max=1.01 * truth.period,
+                                oversample=3.0, q_min=0.03)
+
+
+def test_cpu_fast_coarse_to_fine_recovers_full_peak(lightcurve, oversampled_freqs, monkeypatch):
+    """coarse_factor=3 finds the same best frequency/power as the full grid while
+    evaluating far fewer frequencies; power stays full length."""
+    freqs = oversampled_freqs
+    from multiband_bls import _fast
+
+    bands, _ = lightcurve
+    t, y, dy = coadd_bands(bands)
+    full = eebls_fast(t, y, dy, freqs, nbins=200, q_max=0.12)
+    mfull = multiband_eebls_fast(bands, freqs, nbins=200, q_max=0.12)
+
+    evaluated = {"n": 0}
+    real_s, real_m = _fast.eebls_fast_grid, _fast.meebls_fast_grid
+
+    def count_s(t_, wx, w, f, *a):
+        evaluated["n"] += len(f)
+        return real_s(t_, wx, w, f, *a)
+
+    def count_m(t_, wx, w, band, nbd, f, *a):
+        evaluated["n"] += len(f)
+        return real_m(t_, wx, w, band, nbd, f, *a)
+
+    monkeypatch.setattr(_fast, "eebls_fast_grid", count_s)
+    monkeypatch.setattr(_fast, "meebls_fast_grid", count_m)
+    coarse = eebls_fast(t, y, dy, freqs, nbins=200, q_max=0.12, coarse_factor=3, n_refine=5)
+    assert evaluated["n"] < 0.6 * freqs.size
+    evaluated["n"] = 0
+    mcoarse = multiband_eebls_fast(bands, freqs, nbins=200, q_max=0.12,
+                                   coarse_factor=3, n_refine=5, n_threads=2)
+    assert evaluated["n"] < 0.6 * freqs.size
+
+    for c, f in ((coarse, full), (mcoarse, mfull)):
+        assert c.power.shape == f.power.shape
+        assert c.best_frequency == f.best_frequency
+        assert c.best_power == f.best_power
+        assert c.best_period == pytest.approx(f.best_period)
+        assert np.all(c.power <= f.best_power + 1e-15)
+    assert mcoarse.bands == tuple(bands)
+
+
+@_GPU
+def test_gpu_fast_coarse_to_fine_recovers_full_peak(lightcurve, oversampled_freqs):
+    freqs = oversampled_freqs
+    bands, _ = lightcurve
+    t, y, dy = coadd_bands(bands)
+    full = eebls_gpu_fast(t, y, dy, freqs, nbins=200, q_max=0.12)
+    coarse = eebls_gpu_fast(t, y, dy, freqs, nbins=200, q_max=0.12,
+                            coarse_factor=3, n_refine=5)
+    assert coarse.power.shape == full.power.shape
+    assert coarse.best_frequency == full.best_frequency
+    assert coarse.best_power == pytest.approx(full.best_power)
+
+    mfull = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.12)
+    mcoarse = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.12,
+                                       coarse_factor=3, n_refine=5)
+    assert mcoarse.best_frequency == mfull.best_frequency
+    assert mcoarse.best_power == pytest.approx(mfull.best_power)
+    assert mfull.n_bands_used is not None and mcoarse.n_bands_used is None
+
+
+@_GPU
+@pytest.mark.parametrize("nbins", [60, 200, 300])
+def test_gpu_fast_multiband_matches_cpu_across_sweep_paths(lightcurve, freqs, nbins):
+    """The multiband GPU sweep distributes (start, width) pairs over threads for small
+    nbins and loops widths per start for large nbins; both agree with the CPU search."""
+    bands, _ = lightcurve
+    cpu = multiband_eebls_fast(bands, freqs, nbins=nbins, q_min=0.02, q_max=0.12)
+    gpu = multiband_eebls_gpu_fast(bands, freqs, nbins=nbins, q_min=0.02, q_max=0.12)
+    np.testing.assert_allclose(cpu.power, gpu.power, rtol=5e-3, atol=5e-5)
+    assert gpu.n_bands_used is not None
+    assert gpu.n_bands_used.shape == freqs.shape
+    assert gpu.n_bands_used.min() >= 0 and gpu.n_bands_used.max() <= len(bands)

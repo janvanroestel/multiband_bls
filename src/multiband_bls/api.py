@@ -437,6 +437,56 @@ def _threaded_grid(kernel: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.fl
         return np.concatenate(list(pool.map(kernel, chunks)))
 
 
+def _check_coarse(coarse_factor: int, n_refine: int, name: str) -> tuple[int, int]:
+    """Validate the coarse-to-fine parameters (integers >= 1)."""
+    for label, v in (("coarse_factor", coarse_factor), ("n_refine", n_refine)):
+        if isinstance(v, bool) or not isinstance(v, (int, np.integer)) or v < 1:
+            raise ValueError(f"{name}: {label} must be an integer >= 1, got {v!r}.")
+    return int(coarse_factor), int(n_refine)
+
+
+def _coarse_to_fine(
+    evaluate: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]],
+    freqs: npt.NDArray[np.float64],
+    coarse_factor: int,
+    n_refine: int,
+) -> npt.NDArray[np.float64]:
+    """Raw power over ``freqs`` from a coarse pass plus local refinement.
+
+    ``evaluate(f)`` returns the raw (unnormalised) power at the frequencies ``f``.
+    With ``coarse_factor == 1`` this is just ``evaluate(freqs)``. Otherwise every
+    ``coarse_factor``-th frequency (plus the last) is evaluated first; the
+    ``n_refine`` highest coarse samples that are at least two coarse steps apart
+    are then refined by evaluating every grid frequency within one coarse step of
+    them. Frequencies that were not evaluated hold the linear interpolation of the
+    coarse values (never above the larger neighbouring coarse sample), so the
+    maximum of the result is always an exactly evaluated frequency.
+    """
+    nf = freqs.size
+    if coarse_factor <= 1 or nf < 4 * coarse_factor:
+        return evaluate(freqs)
+    idx_c = np.arange(0, nf, coarse_factor)
+    if idx_c[-1] != nf - 1:
+        idx_c = np.append(idx_c, nf - 1)
+    pc = evaluate(freqs[idx_c])
+    picked: list[int] = []
+    for c in np.argsort(pc)[::-1]:
+        if all(abs(int(c) - q) >= 2 for q in picked):
+            picked.append(int(c))
+            if len(picked) == n_refine:
+                break
+    want = np.zeros(nf, dtype=bool)
+    for c in picked:
+        want[idx_c[max(c - 1, 0)]: idx_c[min(c + 1, idx_c.size - 1)] + 1] = True
+    want[idx_c] = False
+    todo = np.flatnonzero(want)
+    power = np.interp(freqs, freqs[idx_c], pc)
+    if todo.size:
+        power[todo] = evaluate(freqs[todo])
+    power[idx_c] = pc
+    return power
+
+
 def eebls_fast(
     t: Array,
     y: Array,
@@ -448,6 +498,8 @@ def eebls_fast(
     min_points: int = 3,
     dlogq: float = 0.3,
     n_threads: int = 1,
+    coarse_factor: int = 1,
+    n_refine: int = 20,
 ) -> BLSResult:
     """Fast CPU binned BLS using prefix-sum bins and log-spaced transit widths.
 
@@ -467,6 +519,16 @@ def eebls_fast(
         ``dlogq=0`` evaluates every integer width (same windows as :func:`eebls`).
     n_threads :
         Number of threads the frequency grid is split over (default 1).
+    coarse_factor, n_refine :
+        Opt-in coarse-to-fine search (default ``coarse_factor=1``: the full grid).
+        With ``coarse_factor = k > 1`` only every k-th frequency is searched, then
+        the full grid is searched around the ``n_refine`` highest separated coarse
+        peaks. This cuts the work by roughly ``k`` but can miss a peak whose coarse
+        sample falls outside the top ``n_refine`` (narrow signals, weak peaks among
+        many aliases); keep ``k`` at or below the grid's oversampling and validate
+        recovery against the full grid before using it. ``frequency``/``power`` stay
+        full length, with unsearched frequencies holding the interpolated coarse
+        power.
 
     Notes
     -----
@@ -486,6 +548,7 @@ def eebls_fast(
     _check_phase_range(t, freqs)
     dlogq = _check_dlogq(dlogq, "eebls_fast")
     n_threads = _check_n_threads(n_threads, "eebls_fast")
+    coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine, "eebls_fast")
     wx, w_hat, yy = _preprocess_single(y, dy)
     tc = np.ascontiguousarray(t - np.median(t), dtype=np.float64)
     kmi, kma = _grid_params(nbins, q_min, q_max)
@@ -495,7 +558,8 @@ def eebls_fast(
     def kernel(f: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         return _fast.eebls_fast_grid(tc, wx, w_hat, np.ascontiguousarray(f), nbins, widths, mp)
 
-    power = _threaded_grid(kernel, freqs, n_threads)
+    power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, n_threads), freqs,
+                            coarse_factor, n_refine)
     return _result(power, yy, freqs,
                    lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
                                     q_min=q_min, q_max=q_max, min_points=min_points))
@@ -511,6 +575,8 @@ def multiband_eebls_fast(
     dlogq: float = 0.3,
     rescale_errors: bool = False,
     n_threads: int = 1,
+    coarse_factor: int = 1,
+    n_refine: int = 20,
 ) -> BLSResult:
     """Fast CPU binned multiband BLS using prefix-sum bins and log-spaced widths.
 
@@ -526,6 +592,8 @@ def multiband_eebls_fast(
         Logarithmic width spacing, as in :func:`multiband_bls.multiband_eebls_gpu_fast`.
     n_threads :
         Number of threads the frequency grid is split over (default 1).
+    coarse_factor, n_refine :
+        Opt-in coarse-to-fine search, as in :func:`eebls_fast`.
 
     Notes
     -----
@@ -544,6 +612,7 @@ def multiband_eebls_fast(
     bands, chi2_red = _prepare_bands(bands, rescale_errors)
     dlogq = _check_dlogq(dlogq, "multiband_eebls_fast")
     n_threads = _check_n_threads(n_threads, "multiband_eebls_fast")
+    coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine, "multiband_eebls_fast")
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     _check_phase_range(t_all, freqs)
     tc = np.ascontiguousarray(t_all - np.median(t_all), dtype=np.float64)
@@ -556,7 +625,8 @@ def multiband_eebls_fast(
         return _fast.meebls_fast_grid(tc, wx_all, w_all, band_all, len(labels),
                                       np.ascontiguousarray(f), nbins, widths, mp, band_w)
 
-    power = _threaded_grid(kernel, freqs, n_threads)
+    power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, n_threads), freqs,
+                            coarse_factor, n_refine)
     # bands were already rescaled above: refine on them without rescaling again
     return _result(power, chi2_flat, freqs,
                    lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
