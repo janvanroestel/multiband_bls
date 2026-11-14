@@ -31,7 +31,9 @@ import numpy as np
 import numpy.typing as npt
 
 from .api import (
+    _check_coarse,
     _check_dlogq,
+    _coarse_to_fine,
     _grid_params,
     _log_widths,
     _merge_bands,
@@ -402,6 +404,70 @@ _FAST_BOX_MULTI_SRC = _FAST_HELPERS + r"""
 // frequency's best window to kout (n_bands_used); without it kout is unused.
 // Shared memory: (3*n_bands*nb + 8) * 4 bytes, + 32 B with WITH_K
 // (~35.2 KB for n_bands=6, nb=500)
+// One (start i1, width wi) window of the multiband sweep: updates best2 (and
+// best_k with WITH_K). sh holds ybin/rbin/cbin (inclusive cumsums) per band.
+__device__ __forceinline__ void eval_window(
+    const float* __restrict__ sh, const int* __restrict__ widths, const float* bw,
+    int i1, int wi, int nb, int tot, int n_bands, float min_cnt,
+    float& best2
+#ifdef WITH_K
+    , int& best_k
+#endif
+    )
+{
+    const int ww = __ldg(&widths[wi]);
+    const int j2 = i1 + ww - 1;
+    const bool wrap = (j2 >= nb);              // single wrap safe: kma <= nb
+    const int j2w = wrap ? j2 - nb : j2;
+    // One pass over bands: accumulate the total count and the statistic of the
+    // bands that have points in the window; the total-count gate is applied
+    // afterwards (same result as the CPU's gate-then-sum, without per-band
+    // scratch arrays).
+    float cnt_tot = 0.f, sr2 = 0.f; int kk = 0;
+    for (int b = 0; b < n_bands; b++) {
+        const float* cy = sh + b * nb;
+        const float* cr = sh + tot + b * nb;
+        const float* cc = sh + 2 * tot + b * nb;
+        const float y0 = (i1 > 0) ? cy[i1 - 1] : 0.f;
+        const float r0 = (i1 > 0) ? cr[i1 - 1] : 0.f;
+        const float c0 = (i1 > 0) ? cc[i1 - 1] : 0.f;
+        float sy, sr, sc;
+        if (!wrap) {
+            sy = cy[j2w] - y0;
+            sr = cr[j2w] - r0;
+            sc = cc[j2w] - c0;
+        } else {
+            sy = (cy[nb - 1] - y0) + cy[j2w];
+            sr = (cr[nb - 1] - r0) + cr[j2w];
+            sc = (cc[nb - 1] - c0) + cc[j2w];
+        }
+        cnt_tot += sc;
+        // identifiable only with points both in and out of the window
+        // (cc[nb - 1] is the band's total point count)
+        if (sc < 0.5f || sc > cc[nb - 1] - 0.5f) continue;
+        const float denom = sr * (1.f - sr);
+        if (denom <= 0.f) continue;
+        sr2 += bw[b] * sy * sy / denom; kk++;
+    }
+    if (cnt_tot < min_cnt) return;
+#ifdef WITH_K
+    if (sr2 > best2) { best2 = sr2; best_k = kk; }
+#else
+    (void)kk;
+    if (sr2 > best2) best2 = sr2;
+#endif
+}
+
+// Below this many bins the sweep distributes (start, width) pairs over threads
+// (measured crossover ~200-256 bins on an RTX 3050 Ti; flat wins 1.05-1.5x below).
+#define FLAT_NB 224
+#ifdef WITH_K
+#define EVAL(i1_, wi_) eval_window(sh, widths, bw, i1_, wi_, nb, tot, n_bands, \
+                                   min_cnt, best2, best_k)
+#else
+#define EVAL(i1_, wi_) eval_window(sh, widths, bw, i1_, wi_, nb, tot, n_bands, \
+                                   min_cnt, best2)
+#endif
 extern "C" __global__ __launch_bounds__(256, 4)
 void meebls_fast_kernel(
     const float* __restrict__ t_hi,
@@ -468,50 +534,22 @@ void meebls_fast_kernel(
 #ifdef WITH_K
         int best_k = 0;
 #endif
-        for (int i1 = tid; i1 < nb; i1 += blockDim.x) {
-            for (int wi = 0; wi < n_widths; wi++) {
-                int ww = __ldg(&widths[wi]);
-                int j2 = i1 + ww - 1;
-                bool wrap = (j2 >= nb);        // single wrap safe: kma <= nb
-                int j2w = wrap ? j2 - nb : j2;
-                // One pass over bands: accumulate the total count and the
-                // statistic of the bands that have points in the window; the
-                // total-count gate is applied afterwards (same result as the
-                // CPU's gate-then-sum, without per-band scratch arrays).
-                float cnt_tot = 0.f, sr2 = 0.f; int kk = 0;
-                for (int b = 0; b < n_bands; b++) {
-                    const float* cy = sh + b * nb;
-                    const float* cr = sh + tot + b * nb;
-                    const float* cc = sh + 2 * tot + b * nb;
-                    float y0 = (i1 > 0) ? cy[i1 - 1] : 0.f;
-                    float r0 = (i1 > 0) ? cr[i1 - 1] : 0.f;
-                    float c0 = (i1 > 0) ? cc[i1 - 1] : 0.f;
-                    float sy, sr, sc;
-                    if (!wrap) {
-                        sy = cy[j2w] - y0;
-                        sr = cr[j2w] - r0;
-                        sc = cc[j2w] - c0;
-                    } else {
-                        sy = (cy[nb - 1] - y0) + cy[j2w];
-                        sr = (cr[nb - 1] - r0) + cr[j2w];
-                        sc = (cc[nb - 1] - c0) + cc[j2w];
-                    }
-                    cnt_tot += sc;
-                    // identifiable only with points both in and out of the
-                    // window (cc[nb - 1] is the band's total point count)
-                    if (sc < 0.5f || sc > cc[nb - 1] - 0.5f) continue;
-                    float denom = sr * (1.f - sr);
-                    if (denom <= 0.f) continue;
-                    sr2 += bw[b] * sy * sy / denom; kk++;
-                }
-                if (cnt_tot < min_cnt) continue;
-                #ifdef WITH_K
-                if (sr2 > best2) { best2 = sr2; best_k = kk; }
-#else
-                (void)kk;
-                if (sr2 > best2) best2 = sr2;
-#endif
+        if (nb < FLAT_NB) {
+            // Few starts: spread the (start, width) pairs over all threads
+            // (p = wi * nb + i1, consecutive threads -> consecutive starts) so
+            // nb < blockDim.x does not leave threads idle through the sweep.
+            // Ties between equal statistics are broken by thread order, as
+            // below; n_bands_used was checked identical on test grids.
+            const int n_pairs = nb * n_widths;
+            for (int p = tid; p < n_pairs; p += blockDim.x) {
+                const int wi = p / nb;
+                EVAL(p - wi * nb, wi);
             }
+        } else {
+            // Enough starts to keep the block busy: loop widths per start, which
+            // reloads the per-start prefix values once rather than per width.
+            for (int i1 = tid; i1 < nb; i1 += blockDim.x)
+                for (int wi = 0; wi < n_widths; wi++) EVAL(i1, wi);
         }
 
 #ifdef WITH_K
@@ -788,6 +826,8 @@ def eebls_gpu_fast(
     q_max: float = 0.10,
     min_points: int = 3,
     dlogq: float = 0.3,
+    coarse_factor: int = 1,
+    n_refine: int = 20,
 ) -> BLSResult:
     """Fast GPU binned BLS using prefix-sum bins and log-spaced transit widths.
 
@@ -823,6 +863,12 @@ def eebls_gpu_fast(
         Logarithmic spacing between trial widths. Smaller = more widths = higher
         fidelity but slower. ``dlogq=0`` recovers the full linear search.
         Typical range: 0.1 – 0.5.
+    coarse_factor, n_refine :
+        Opt-in coarse-to-fine search (default ``coarse_factor=1``: the full grid).
+        Only every ``coarse_factor``-th frequency is searched, then the full grid
+        around the ``n_refine`` highest separated coarse peaks; see
+        :func:`multiband_bls.eebls_fast`. Can miss narrow or weak peaks, so validate
+        recovery against the full grid first.
 
     Notes
     -----
@@ -857,6 +903,7 @@ def eebls_gpu_fast(
         )
 
     dlogq = _check_dlogq(dlogq, "eebls_gpu_fast")
+    coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine, "eebls_gpu_fast")
     _kernels()  # ensure compiled
     wx, w_hat, yy = _preprocess_single(y, dy)
 
@@ -869,8 +916,6 @@ def eebls_gpu_fast(
     tlo_d = cp.asarray(t_lo, dtype=cp.float32)
     wx_d = cp.asarray(wx, dtype=cp.float32)
     w_d = cp.asarray(w_hat, dtype=cp.float32)
-    f_d = cp.asarray(freqs_np, dtype=cp.float64)
-    nf = int(f_d.size)
     n = int(thi_d.size)
     kmi, kma = _grid_params(nbins, q_min, q_max)
 
@@ -880,7 +925,6 @@ def eebls_gpu_fast(
     logger.debug("eebls_gpu_fast: nb=%d kmi=%d kma=%d n_widths=%d (linear=%d)",
                  nbins, kmi, kma, n_widths, kma - kmi + 1)
 
-    power_d = cp.empty(nf, dtype=cp.float64)
     shared = (3 * nbins + 8) * 4  # float32: ybin + rbin + cbin [nb] + warp_max[8]
     smem_cap = _fast_single_kernel.max_dynamic_shared_size_bytes
     if shared > smem_cap:
@@ -889,14 +933,20 @@ def eebls_gpu_fast(
             f"((3 * nbins={nbins} + 8) * 4) but the device allows "
             f"{smem_cap} B; reduce nbins."
         )
-    n_blocks = min(nf, 2048)
-    _fast_single_kernel(
-        (n_blocks,), (_THREADS,),
-        (thi_d, tlo_d, wx_d, w_d, np.int32(n), np.int32(nf), f_d, np.int32(nbins),
-         widths_d, np.int32(n_widths), np.int32(min(min_points, n + 1)), power_d),
-        shared_mem=shared,
-    )
-    power_np = cp.asnumpy(power_d)
+
+    def evaluate(f_np: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        f_d = cp.asarray(f_np, dtype=cp.float64)
+        nf = int(f_d.size)
+        power_d = cp.empty(nf, dtype=cp.float64)
+        _fast_single_kernel(
+            (min(nf, 2048),), (_THREADS,),
+            (thi_d, tlo_d, wx_d, w_d, np.int32(n), np.int32(nf), f_d, np.int32(nbins),
+             widths_d, np.int32(n_widths), np.int32(min(min_points, n + 1)), power_d),
+            shared_mem=shared,
+        )
+        return cp.asnumpy(power_d)
+
+    power_np = _coarse_to_fine(evaluate, freqs_np, coarse_factor, n_refine)
     return _result(power_np, yy, freqs_np,
                    lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
                                     q_min=q_min, q_max=q_max,
@@ -913,6 +963,8 @@ def multiband_eebls_gpu_fast(
     dlogq: float = 0.3,
     rescale_errors: bool = False,
     compute_n_bands_used: bool = True,
+    coarse_factor: int = 1,
+    n_refine: int = 20,
 ) -> BLSResult:
     """Fast GPU binned multiband BLS using prefix-sum bins and log-spaced widths.
 
@@ -946,6 +998,10 @@ def multiband_eebls_gpu_fast(
         ``None`` and skip the count, which costs up to ~15% kernel time for sparse
         light curves with few bands (measured: 3 bands, n = 1k–3k points) and
         ~1–5% otherwise.
+    coarse_factor, n_refine :
+        Opt-in coarse-to-fine search, as in :func:`eebls_gpu_fast`. With
+        ``coarse_factor > 1`` :attr:`BLSResult.n_bands_used` is ``None`` (it is not
+        defined at the interpolated frequencies).
 
     Notes
     -----
@@ -977,6 +1033,9 @@ def multiband_eebls_gpu_fast(
     bands, chi2_red = _prepare_bands(bands, rescale_errors)
 
     dlogq = _check_dlogq(dlogq, "multiband_eebls_gpu_fast")
+    coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine,
+                                            "multiband_eebls_gpu_fast")
+    compute_n_bands_used = compute_n_bands_used and coarse_factor == 1
     _kernels()  # ensure compiled
     kernel = _fast_multi_kernel_k if compute_n_bands_used else _fast_multi_kernel
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
@@ -1002,8 +1061,6 @@ def multiband_eebls_gpu_fast(
     w_d = cp.asarray(w_all, dtype=cp.float32)
     band_d = cp.asarray(band_all, dtype=cp.int32)
     bw_d = cp.asarray(w_totals, dtype=cp.float64)
-    f_d = cp.asarray(freqs_np, dtype=cp.float64)
-    nf = int(f_d.size)
     n = int(thi_d.size)
     kmi, kma = _grid_params(nbins, q_min, q_max)
 
@@ -1013,10 +1070,6 @@ def multiband_eebls_gpu_fast(
     logger.debug("multiband_eebls_gpu_fast: nb=%d kmi=%d kma=%d n_widths=%d (linear=%d)",
                  nbins, kmi, kma, n_widths, kma - kmi + 1)
 
-    power_d = cp.empty(nf, dtype=cp.float64)
-    # k output; a 1-element placeholder when the kernel is compiled without WITH_K
-    k_d = cp.zeros(nf if compute_n_bands_used else 1, dtype=cp.int32)
-    n_blocks = min(nf, 2048)
     # float32: ybin + rbin + cbin (per band) + warp_max[8] (+ int warp_k[8])
     n_extra = 16 if compute_n_bands_used else 8
     shared = (3 * n_bands * nbins + n_extra) * 4
@@ -1027,15 +1080,28 @@ def multiband_eebls_gpu_fast(
             f"((3 * n_bands={n_bands} * nbins={nbins} + {n_extra}) * 4) but the "
             f"device allows {smem_cap} B; reduce nbins or n_bands."
         )
-    kernel(
-        (n_blocks,), (_THREADS,),
-        (thi_d, tlo_d, wx_d, w_d, band_d, bw_d, np.int32(n), np.int32(n_bands),
-         np.int32(nf), f_d, np.int32(nbins), widths_d, np.int32(n_widths),
-         np.int32(min(min_points, n + 1)), power_d, k_d),
-        shared_mem=shared,
-    )
-    power = cp.asnumpy(power_d)
-    n_bands_used = cp.asnumpy(k_d).astype(np.int64) if compute_n_bands_used else None
+    k_out: list[npt.NDArray[np.int32]] = []
+
+    def evaluate(f_np: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        f_d = cp.asarray(f_np, dtype=cp.float64)
+        nf = int(f_d.size)
+        power_d = cp.empty(nf, dtype=cp.float64)
+        # k output; a 1-element placeholder when the kernel is compiled without WITH_K
+        k_d = cp.zeros(nf if compute_n_bands_used else 1, dtype=cp.int32)
+        kernel(
+            (min(nf, 2048),), (_THREADS,),
+            (thi_d, tlo_d, wx_d, w_d, band_d, bw_d, np.int32(n), np.int32(n_bands),
+             np.int32(nf), f_d, np.int32(nbins), widths_d, np.int32(n_widths),
+             np.int32(min(min_points, n + 1)), power_d, k_d),
+            shared_mem=shared,
+        )
+        if compute_n_bands_used:
+            k_out.append(cp.asnumpy(k_d))
+        return cp.asnumpy(power_d)
+
+    power = _coarse_to_fine(evaluate, freqs_np, coarse_factor, n_refine)
+    # (coarse_factor == 1 evaluates the whole grid in one call)
+    n_bands_used = k_out[0].astype(np.int64) if compute_n_bands_used else None
     # Refine on the already-prepared (possibly rescaled) bands so power and the
     # refined parameters share one objective.
     return _result(power, chi2_flat, freqs_np,
@@ -1043,3 +1109,5 @@ def multiband_eebls_gpu_fast(
                                               q_min=q_min, q_max=q_max,
                                               min_points=min_points),
                    bands=labels, band_chi2_red=chi2_red, n_bands_used=n_bands_used)
+
+
