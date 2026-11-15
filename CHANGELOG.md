@@ -57,6 +57,11 @@
   GPU and the new CPU fast entry points use them. `gpu.py` re-imports them, so
   `multiband_bls.gpu._log_widths` etc. still work.
 
+### Removed
+
+- The unused trapezoid-shape code path in `_eebls.pyx` (`f_arr`/`tau`); `eebls_grid`
+  no longer takes `f_arr` or returns `best_tau`. Not part of the public API.
+
 ## [0.1.0] — 2026-10-17
 
 Initial release.
@@ -114,8 +119,3 @@ Initial release.
 - Generated Cython `.c` files are no longer tracked or shipped in the sdist;
   builds always cythonize the `.pyx` sources. CI builds and smoke-tests a wheel
   from the sdist.
-
-### Removed
-
-- The unused trapezoid-shape code path in `_eebls.pyx` (`f_arr`/`tau`); `eebls_grid`
-  no longer takes `f_arr` or returns `best_tau`. Not part of the public API.
