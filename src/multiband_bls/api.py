@@ -512,9 +512,9 @@ def _coarse_to_fine(
         out = np.empty(nf)
         out[order] = _coarse_to_fine(evaluate, freqs[order], coarse_factor, n_refine)
         return out
-    idx_c = np.arange(0, nf, coarse_factor)
+    idx_c: npt.NDArray[np.intp] = np.arange(0, nf, coarse_factor, dtype=np.intp)
     if idx_c[-1] != nf - 1:
-        idx_c = np.append(idx_c, nf - 1)
+        idx_c = np.append(idx_c, np.intp(nf - 1))
     pc = evaluate(freqs[idx_c])
     picked: list[int] = []
     for c in np.argsort(pc)[::-1]:
