@@ -662,13 +662,16 @@ def multiband_eebls_fast(
     t_offset = float(np.median(t_all))
     tc = np.ascontiguousarray(t_all - t_offset, dtype=np.float64)
     band_w = np.ascontiguousarray(w_totals, dtype=np.float64)
+    band32 = np.ascontiguousarray(band_all, dtype=np.int32)
+    band_n = np.bincount(band32, minlength=len(labels)).astype(np.float64)
     kmi, kma = _grid_params(nbins, q_min, q_max)
     widths = np.ascontiguousarray(_log_widths(kmi, kma, dlogq), dtype=np.int32)
     mp = min(min_points, t_all.shape[0] + 1)
 
     def kernel(f: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        return _fast.meebls_fast_grid(tc, wx_all, w_all, band_all, len(labels),
-                                      np.ascontiguousarray(f), nbins, widths, mp, band_w)
+        return _fast.meebls_fast_grid(tc, wx_all, w_all, band32, len(labels),
+                                      np.ascontiguousarray(f), nbins, widths, mp, band_w,
+                                      band_n)
 
     power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, n_threads), freqs,
                             coarse_factor, n_refine)

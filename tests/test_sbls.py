@@ -1507,3 +1507,55 @@ def test_gpu_fast_is_flux_scale_invariant(lightcurve, freqs, scale):
     mgot = multiband_eebls_gpu_fast(scaled, freqs, nbins=200, q_max=0.12)
     assert np.all(np.isfinite(mgot.power))
     np.testing.assert_allclose(mgot.power, mref.power, rtol=1e-3, atol=1e-6)
+
+
+@_GPU
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True])
+def test_gpu_coarse_params_validated(bad):
+    t, y, dy = _small_lc()
+    for kw in ({"coarse_factor": bad}, {"n_refine": bad}):
+        with pytest.raises(ValueError, match=r"coarse_factor|n_refine"):
+            eebls_gpu_fast(t, y, dy, _VFREQS, **kw)
+        with pytest.raises(ValueError, match=r"coarse_factor|n_refine"):
+            multiband_eebls_gpu_fast({"g": (t, y, dy)}, _VFREQS, **kw)
+
+
+def test_fast_entry_points_permutation_offset_scale_invariant(lightcurve, freqs):
+    """The CPU fast searches depend neither on point/band order, per-band baselines,
+    nor a common (y, dy) scale."""
+    bands, _ = lightcurve
+    rng = np.random.default_rng(8)
+    shuffled = {}
+    for b in reversed(list(bands)):
+        t, y, dy = bands[b]
+        o = rng.permutation(len(t))
+        shuffled[b] = (t[o], y[o], dy[o])
+    shifted = {b: (t, y + 7.0 * i, dy) for i, (b, (t, y, dy)) in enumerate(bands.items())}
+    scaled = {b: (t, 3.0 * y, 3.0 * dy) for b, (t, y, dy) in bands.items()}
+    kw = {"nbins": 200, "q_max": 0.12}
+    ref = multiband_eebls_fast(bands, freqs, **kw).power
+    for variant in (shuffled, shifted, scaled):
+        np.testing.assert_allclose(multiband_eebls_fast(variant, freqs, **kw).power, ref,
+                                   rtol=1e-8, atol=1e-12)
+    t, y, dy = coadd_bands(bands)
+    sref = eebls_fast(t, y, dy, freqs, **kw).power
+    o = rng.permutation(len(t))
+    for args in ((t[o], y[o], dy[o]), (t, y + 5.0, dy), (t, 3.0 * y, 3.0 * dy)):
+        np.testing.assert_allclose(eebls_fast(*args, freqs, **kw).power, sref,
+                                   rtol=1e-8, atol=1e-12)
+
+
+def test_helper_validation_rejects_bool_and_strings():
+    t = np.linspace(0.0, 10.0, 50)
+    with pytest.raises(ValueError):
+        build_frequency_grid(t, oversample=True)
+    with pytest.raises(ValueError):
+        build_frequency_grid(t, q_min="0.1")
+    with pytest.raises(ValueError):
+        sparse_bls(t, np.sin(t), np.ones(50), np.array([1.0]), q_max="0.1")
+    with pytest.raises(ValueError):
+        auto_nbins(0.1, n_res=0)
+    with pytest.raises(ValueError):
+        auto_nbins(0.1, n_res=True)
+    with pytest.warns(UserWarning):
+        assert auto_nbins(1e-308) == 500   # no OverflowError for a tiny q_min

@@ -93,8 +93,9 @@ def eebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
 
 
 def meebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
-                     cnp.int64_t[::1] band, int n_bands, double[::1] freqs, int nb,
-                     cnp.int32_t[::1] widths, long long min_points, double[::1] band_w):
+                     cnp.int32_t[::1] band, int n_bands, double[::1] freqs, int nb,
+                     cnp.int32_t[::1] widths, long long min_points, double[::1] band_w,
+                     double[::1] band_n):
     """Periodogram ``sum_b W_b s_b^2 / (r_b (1 - r_b))`` of the multiband
     prefix-sum BLS over ``freqs``.
 
@@ -116,8 +117,6 @@ def meebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
     cdef double[::1] acc = np.empty(nb + 1, dtype=np.float64)
     cdef cnp.int32_t[::1] idx = np.empty(nb + 1, dtype=np.int32)
     cdef cnp.int32_t[::1] ibuf = np.empty(max(n, 1), dtype=np.int32)
-    cdef cnp.int32_t[::1] band32 = np.ascontiguousarray(band, dtype=np.int32)
-    cdef double[::1] band_n = np.bincount(np.asarray(band), minlength=n_bands).astype(np.float64)
     cdef Py_ssize_t fi
     cdef double mp = <double>min_points
 
@@ -126,7 +125,7 @@ def meebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
     _check_phase_int32(t, freqs)
     with nogil:
         for fi in range(nf):
-            mbls_prepare_multi(&t[0], &wx[0], &w_hat[0], <const int*>&band32[0], n, n_bands,
+            mbls_prepare_multi(&t[0], &wx[0], &w_hat[0], <const int*>&band[0], n, n_bands,
                                freqs[fi], nb, &cy[0], &cr[0], &cc[0], &ct[0],
                                <int*>&ibuf[0])
             pw[fi] = mbls_sweep_multi(&cy[0], &cr[0], &cc[0], &ct[0], n_bands, nb,

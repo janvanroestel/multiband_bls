@@ -171,6 +171,8 @@ def _check_int(name: str, value: object, minimum: int) -> int:
 
 def _check_fraction(name: str, value: object) -> float:
     """Return ``value`` as a float in the open interval ``(0, 1)``, else raise."""
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise ValueError(f"{name} must be a number in (0, 1), got {value!r}.")
     try:
         v = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -342,7 +344,7 @@ def auto_nbins(q_min: float, n_res: int = 5) -> int:
     Raises
     ------
     ValueError
-        If ``q_min`` is not finite and ``> 0``.
+        If ``q_min`` is not finite and ``> 0``, or ``n_res`` is not an integer ``>= 1``.
 
     Warns
     -----
@@ -352,16 +354,18 @@ def auto_nbins(q_min: float, n_res: int = 5) -> int:
     """
     if not (np.isfinite(q_min) and q_min > 0.0):
         raise ValueError(f"q_min must be finite and > 0, got {q_min!r}.")
-    wanted = round(n_res / q_min)
+    if isinstance(n_res, (bool, np.bool_)) or not isinstance(n_res, (int, np.integer)) or n_res < 1:
+        raise ValueError(f"n_res must be an integer >= 1, got {n_res!r}.")
+    wanted = n_res / q_min  # float: a tiny q_min must not overflow an int conversion
     if wanted > 500:
         warnings.warn(
-            f"auto_nbins: q_min={q_min} needs {wanted} bins for {n_res} bins per "
+            f"auto_nbins: q_min={q_min} needs {wanted:.0f} bins for {n_res} bins per "
             f"transit, but nbins is capped at 500, giving only {500 * q_min:.2g} "
             "bins across the narrowest transit. Pass an explicit nbins to override.",
             UserWarning,
             stacklevel=2,
         )
-    return int(np.clip(wanted, 50, 500))
+    return int(np.clip(round(wanted), 50, 500)) if wanted <= 500 else 500
 
 
 def variance_explained(sr2: Array, denom: float) -> Array:
@@ -418,7 +422,12 @@ def build_frequency_grid(
         time array is not finite or spans zero baseline.
     """
     def _positive(name: str, value: float) -> float:
-        v = float(value)
+        if isinstance(value, (bool, np.bool_, str, bytes)):
+            raise ValueError(f"{name} must be a number > 0, got {value!r}.")
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be a number > 0, got {value!r}.") from None
         if not (np.isfinite(v) and v > 0.0):
             raise ValueError(f"{name} must be finite and > 0, got {value!r}.")
         return v

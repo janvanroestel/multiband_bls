@@ -34,6 +34,13 @@
 - GPU fast kernels reject light curves with `n >= 2**23` points (was `2**24`): above
   that the float32 `count - 0.5` gates round to the count itself.
 - Coarse-to-fine search on a descending or unsorted frequency grid.
+- Build flags: `-fno-finite-math-only` is added to `-O3 -ffast-math` so the NaN that the
+  multiband cores store for unmeasured bands is well defined; MSVC builds use `/O2`.
+- `multiband_eebls_fast` converts the band index and counts the points per band once
+  instead of in every thread chunk.
+- `build_frequency_grid` and the `q_*` fraction checks reject `bool` and string
+  arguments; `auto_nbins` validates `n_res` and no longer raises `OverflowError` for a
+  tiny `q_min`.
 
 ### Changed
 
