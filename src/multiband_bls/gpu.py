@@ -33,6 +33,7 @@ import numpy.typing as npt
 from .api import (
     _check_coarse,
     _check_dlogq,
+    _coarse_active,
     _coarse_to_fine,
     _flux_scale,
     _grid_params,
@@ -1011,7 +1012,8 @@ def multiband_eebls_gpu_fast(
     coarse_factor, n_refine :
         Opt-in coarse-to-fine search, as in :func:`eebls_gpu_fast`. With
         ``coarse_factor > 1`` :attr:`BLSResult.n_bands_used` is ``None`` (it is not
-        defined at the interpolated frequencies).
+        defined at the interpolated frequencies), unless the grid is too short
+        (``< 4 * coarse_factor`` frequencies) for any frequency to be skipped.
 
     Notes
     -----
@@ -1045,7 +1047,10 @@ def multiband_eebls_gpu_fast(
     dlogq = _check_dlogq(dlogq, "multiband_eebls_gpu_fast")
     coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine,
                                             "multiband_eebls_gpu_fast")
-    compute_n_bands_used = compute_n_bands_used and coarse_factor == 1
+    # n_bands_used is undefined at interpolated frequencies; it is still available when
+    # the grid is too short for the coarse search to skip any frequency.
+    compute_n_bands_used = compute_n_bands_used and not _coarse_active(
+        freqs_np.size, coarse_factor)
     _kernels()  # ensure compiled
     kernel = _fast_multi_kernel_k if compute_n_bands_used else _fast_multi_kernel
     # Median-uncertainty units keep sy**2 and the band weights inside float32 range
@@ -1114,7 +1119,7 @@ def multiband_eebls_gpu_fast(
         return cp.asnumpy(power_d)
 
     power = _coarse_to_fine(evaluate, freqs_np, coarse_factor, n_refine)
-    # (coarse_factor == 1 evaluates the whole grid in one call)
+    # (a full evaluation, i.e. no coarse search, is one call over the whole grid)
     n_bands_used = k_out[0].astype(np.int64) if compute_n_bands_used else None
     # Refine on the already-prepared (possibly rescaled) bands so power and the
     # refined parameters share one objective.

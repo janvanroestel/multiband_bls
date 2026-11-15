@@ -1559,3 +1559,18 @@ def test_helper_validation_rejects_bool_and_strings():
         auto_nbins(0.1, n_res=True)
     with pytest.warns(UserWarning):
         assert auto_nbins(1e-308) == 500   # no OverflowError for a tiny q_min
+
+
+@_GPU
+def test_gpu_n_bands_used_kept_when_coarse_search_falls_back(lightcurve, oversampled_freqs):
+    """A grid shorter than 4 * coarse_factor is evaluated in full, so n_bands_used is
+    still reported; on a long grid the coarse search drops it."""
+    bands, _ = lightcurve
+    short = oversampled_freqs[:11]
+    kw = {"nbins": 200, "q_max": 0.12, "coarse_factor": 3}
+    res = multiband_eebls_gpu_fast(bands, short, **kw)
+    full = multiband_eebls_gpu_fast(bands, short, nbins=200, q_max=0.12)
+    assert res.n_bands_used is not None
+    np.testing.assert_array_equal(res.n_bands_used, full.n_bands_used)
+    np.testing.assert_array_equal(res.power, full.power)
+    assert multiband_eebls_gpu_fast(bands, oversampled_freqs, **kw).n_bands_used is None

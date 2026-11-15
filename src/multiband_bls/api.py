@@ -482,6 +482,11 @@ def _check_coarse(coarse_factor: int, n_refine: int, name: str) -> tuple[int, in
     return int(coarse_factor), int(n_refine)
 
 
+def _coarse_active(n_freqs: int, coarse_factor: int) -> bool:
+    """Whether :func:`_coarse_to_fine` skips frequencies (else it evaluates them all)."""
+    return coarse_factor > 1 and n_freqs >= 4 * coarse_factor
+
+
 def _coarse_to_fine(
     evaluate: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]],
     freqs: npt.NDArray[np.float64],
@@ -500,7 +505,7 @@ def _coarse_to_fine(
     maximum of the result is always an exactly evaluated frequency.
     """
     nf = freqs.size
-    if coarse_factor <= 1 or nf < 4 * coarse_factor:
+    if not _coarse_active(nf, coarse_factor):
         return evaluate(freqs)
     if np.any(np.diff(freqs) <= 0.0):  # interpolation and the refine bands need ascending order
         order = np.argsort(freqs, kind="stable")

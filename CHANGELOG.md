@@ -18,7 +18,8 @@
   weak or narrow peaks, so validate recovery against the full grid first. In 60 random
   injections (4 bands x 60 points) `coarse_factor` 2-4 recovered all 26 signals the
   full grid recovered, at 2.0-3.8x the speed. `n_bands_used` is `None` for
-  `multiband_eebls_gpu_fast` with `coarse_factor > 1`.
+  `multiband_eebls_gpu_fast` when the coarse search skips frequencies (grids shorter
+  than `4 * coarse_factor` are evaluated in full and keep it).
 
 ### Fixed
 
