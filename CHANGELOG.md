@@ -20,6 +20,21 @@
   full grid recovered, at 2.0-3.8x the speed. `n_bands_used` is `None` for
   `multiband_eebls_gpu_fast` with `coarse_factor > 1`.
 
+### Fixed
+
+- Fast entry points (`eebls_fast`, `multiband_eebls_fast`, `eebls_gpu_fast`,
+  `multiband_eebls_gpu_fast`): `best_t0`, `best_duration` and `best_depth` are now
+  refined on the same median-centred times the search folded, so the refined window
+  passes the same `min_points` gate as the scored one (`best_t0` is still reported
+  on the original time axis).
+- GPU fast kernels now work in units of the median uncertainty: flux scales such as
+  1e-20 (CGS) or 1e25 previously underflowed or overflowed the float32 kernels and
+  returned power 0 or inf. The power is scale-invariant, so results are unchanged
+  otherwise.
+- GPU fast kernels reject light curves with `n >= 2**23` points (was `2**24`): above
+  that the float32 `count - 0.5` gates round to the count itself.
+- Coarse-to-fine search on a descending or unsorted frequency grid.
+
 ### Changed
 
 - CPU fast cores (`_fast.pyx`): the per-frequency fold/bin/prefix-sum and window sweep
@@ -99,3 +114,8 @@ Initial release.
 - Generated Cython `.c` files are no longer tracked or shipped in the sdist;
   builds always cythonize the `.pyx` sources. CI builds and smoke-tests a wheel
   from the sdist.
+
+### Removed
+
+- The unused trapezoid-shape code path in `_eebls.pyx` (`f_arr`/`tau`); `eebls_grid`
+  no longer takes `f_arr` or returns `best_tau`. Not part of the public API.

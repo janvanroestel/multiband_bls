@@ -1463,3 +1463,47 @@ def test_gpu_fast_multiband_matches_cpu_across_sweep_paths(lightcurve, freqs, nb
     assert gpu.n_bands_used is not None
     assert gpu.n_bands_used.shape == freqs.shape
     assert gpu.n_bands_used.min() >= 0 and gpu.n_bands_used.max() <= len(bands)
+
+
+def test_coarse_to_fine_descending_grid_matches_ascending(lightcurve, oversampled_freqs):
+    """An unsorted/descending grid gives the same periodogram as the ascending one."""
+    bands, _ = lightcurve
+    t, y, dy = coadd_bands(bands)
+    kw = {"nbins": 200, "q_max": 0.12, "coarse_factor": 3, "n_refine": 5}
+    asc = eebls_fast(t, y, dy, oversampled_freqs, **kw)
+    desc = eebls_fast(t, y, dy, oversampled_freqs[::-1], **kw)
+    np.testing.assert_array_equal(desc.power, asc.power[::-1])
+    assert desc.best_frequency == asc.best_frequency
+
+
+@pytest.mark.parametrize("offset", [0.0, 2_400_000.0])
+def test_fast_refinement_matches_searched_window(lightcurve, freqs, offset):
+    """The reported epoch/depth come from the window the (median-centred) search
+    scored: non-zero depth and an epoch near the truth, also for JD-like times."""
+    bands, truth = lightcurve
+    shifted = {k: (t + offset, y, dy) for k, (t, y, dy) in bands.items()}
+    t, y, dy = coadd_bands(shifted)
+    for res in (eebls_fast(t, y, dy, freqs, q_max=0.12),
+                multiband_eebls_fast(shifted, freqs, q_max=0.12)):
+        assert res.best_duration > 0.0
+        assert np.all(np.asarray(res.best_depth) != 0.0)
+        dt = (res.best_t0 - (truth.t0 + offset)) % res.best_period
+        assert min(dt, res.best_period - dt) < 0.1 * res.best_period
+
+
+@_GPU
+@pytest.mark.parametrize("scale", [1e-25, 1e-20, 1e19, 1e25])
+def test_gpu_fast_is_flux_scale_invariant(lightcurve, freqs, scale):
+    """float32 kernels run in median-uncertainty units, so tiny/huge flux scales
+    (CGS fluxes, ADU) neither underflow to 0 nor overflow to inf."""
+    bands, _ = lightcurve
+    scaled = {k: (t, y * scale, dy * scale) for k, (t, y, dy) in bands.items()}
+    t, y, dy = coadd_bands(bands)
+    ts, ys, dys = coadd_bands(scaled)
+    ref = eebls_gpu_fast(t, y, dy, freqs, nbins=200, q_max=0.12)
+    got = eebls_gpu_fast(ts, ys, dys, freqs, nbins=200, q_max=0.12)
+    np.testing.assert_allclose(got.power, ref.power, rtol=1e-3, atol=1e-6)
+    mref = multiband_eebls_gpu_fast(bands, freqs, nbins=200, q_max=0.12)
+    mgot = multiband_eebls_gpu_fast(scaled, freqs, nbins=200, q_max=0.12)
+    assert np.all(np.isfinite(mgot.power))
+    np.testing.assert_allclose(mgot.power, mref.power, rtol=1e-3, atol=1e-6)

@@ -34,11 +34,15 @@ from .api import (
     _check_coarse,
     _check_dlogq,
     _coarse_to_fine,
+    _flux_scale,
     _grid_params,
     _log_widths,
     _merge_bands,
     _preprocess_single,
+    _refine_at,
     _result,
+    _scale_bands,
+    _shift_bands,
     eebls,
     multiband_eebls,
 )
@@ -63,9 +67,10 @@ _THREADS = 256  # threads per block. Hard-coded into the kernels: the exact
 # changing _MAX_BANDS (update every fixed [8] per-band array declaration in the
 # kernel sources: bw, s/r/cnt in the exact kernel; bw in the fast kernel).
 _MAX_BANDS: int = 8
-# The fast kernels count in-transit points in float32 bins; integer sums are
-# exact only below 2**24, so larger light curves are rejected.
-_MAX_FAST_POINTS: int = 2**24
+# The fast kernels count in-transit points in float32 bins and gate them against
+# ``count - 0.5f``; both are exact only below 2**23 (float32 spacing <= 0.5), so
+# larger light curves are rejected.
+_MAX_FAST_POINTS: int = 2**23
 # The kernels take point and frequency counts as C int; larger inputs would wrap.
 _MAX_INT32: int = int(np.iinfo(np.int32).max)
 # The fast kernels hold median-centred times and frequencies in float32; keep
@@ -884,7 +889,7 @@ def eebls_gpu_fast(
     recomputed exactly on the CPU at the best frequency, while ``power`` and
     ``best_power`` stay the fast kernel's values; the two need not describe
     exactly the same box.
-    Light curves with ``n >= 2**24`` points are rejected (float32 counts).
+    Light curves with ``n >= 2**23`` points are rejected (float32 counts).
     """
     import cupy as cp
 
@@ -905,7 +910,11 @@ def eebls_gpu_fast(
     dlogq = _check_dlogq(dlogq, "eebls_gpu_fast")
     coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine, "eebls_gpu_fast")
     _kernels()  # ensure compiled
-    wx, w_hat, yy = _preprocess_single(y, dy)
+    # Work in units of the median uncertainty so sy**2 and the band weights stay
+    # inside float32 range for any flux scale; the power is scale-invariant.
+    f_scale = _flux_scale([dy])
+    wx, w_hat, yy = _preprocess_single(np.asarray(y, dtype=np.float64) / f_scale,
+                                       np.asarray(dy, dtype=np.float64) / f_scale)
 
     # Subtract the median so large JD values (t ~ 2.4e6) keep full precision
     # in the two-float split (and the float32 bin accumulators).
@@ -947,10 +956,11 @@ def eebls_gpu_fast(
         return cp.asnumpy(power_d)
 
     power_np = _coarse_to_fine(evaluate, freqs_np, coarse_factor, n_refine)
+    t_c = np.asarray(t, dtype=np.float64) - t_offset
     return _result(power_np, yy, freqs_np,
-                   lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
-                                    q_min=q_min, q_max=q_max,
-                                    min_points=min_points))
+                   _refine_at(lambda bf: eebls(t_c, y, dy, np.array([bf]), nbins=nbins,
+                                               q_min=q_min, q_max=q_max,
+                                               min_points=min_points), t_offset))
 
 
 def multiband_eebls_gpu_fast(
@@ -1015,7 +1025,7 @@ def multiband_eebls_gpu_fast(
     less accurate than the exact kernels'. The best period's parameters are
     recomputed exactly on the CPU, while ``power``/``best_power`` stay the fast
     kernel's values (the two need not describe exactly the same box). Light
-    curves with ``n >= 2**24`` points in total are rejected (float32 counts).
+    curves with ``n >= 2**23`` points in total are rejected (float32 counts).
 
     ``n_bands_used`` counts the bands of the window this kernel
     selects. It matches :func:`multiband_bls.multiband_eebls` when both search
@@ -1038,7 +1048,11 @@ def multiband_eebls_gpu_fast(
     compute_n_bands_used = compute_n_bands_used and coarse_factor == 1
     _kernels()  # ensure compiled
     kernel = _fast_multi_kernel_k if compute_n_bands_used else _fast_multi_kernel
-    t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
+    # Median-uncertainty units keep sy**2 and the band weights inside float32 range
+    # for any flux scale (the power is scale-invariant); refinement uses `bands`.
+    f_scale = _flux_scale([b[2] for b in bands.values()])
+    t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(
+        _scale_bands(bands, f_scale))
     _check_phase_range(t_all, freqs_np)
     _check_int32_sizes(t_all.shape[0], freqs_np.size, "multiband_eebls_gpu_fast")
     n_bands = len(labels)
@@ -1104,10 +1118,11 @@ def multiband_eebls_gpu_fast(
     n_bands_used = k_out[0].astype(np.int64) if compute_n_bands_used else None
     # Refine on the already-prepared (possibly rescaled) bands so power and the
     # refined parameters share one objective.
+    bands_c = _shift_bands(bands, t_offset)
     return _result(power, chi2_flat, freqs_np,
-                   lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
-                                              q_min=q_min, q_max=q_max,
-                                              min_points=min_points),
+                   _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]), nbins=nbins,
+                                                         q_min=q_min, q_max=q_max,
+                                                         min_points=min_points), t_offset),
                    bands=labels, band_chi2_red=chi2_red, n_bands_used=n_bands_used)
 
 

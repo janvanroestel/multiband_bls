@@ -23,6 +23,7 @@ __all__ = [
     "multiband_eebls_fast",
 ]
 
+import dataclasses
 import logging
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -200,12 +201,11 @@ def eebls(
     t, y, dy = _validate_light_curve(t, y, dy)
     _check_phase_range(t, freqs)
     t = np.ascontiguousarray(t, dtype=np.float64)
-    tau_arr = np.zeros(1, dtype=np.float64)  # box only
     wx, w_hat, yy = _preprocess_single(y, dy)
 
-    power, best_freq, t0, dur, depth, sr, _ = _eebls.eebls_grid(
+    power, best_freq, t0, dur, depth, sr = _eebls.eebls_grid(
         t, wx, w_hat, freqs, nbins, float(q_min), float(q_max),
-        min_points, tau_arr,
+        min_points,
     )
     return BLSResult(
         frequency=freqs,
@@ -388,6 +388,43 @@ def _grid_params(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
     return kmi, kma
 
 
+def _refine_at(
+    refine_fn: Callable[[float], BLSResult], offset: float
+) -> Callable[[float], BLSResult]:
+    """Wrap ``refine_fn`` (run on times shifted by ``-offset``) to report epochs unshifted.
+
+    The fast searches fold median-centred times; refining on the same centred times
+    keeps the bin edges identical, so the refined window passes the same gates as
+    the search. Only ``best_t0`` depends on the shift.
+    """
+    def refine(bf: float) -> BLSResult:
+        ref = refine_fn(bf)
+        t0 = float((ref.best_t0 + offset) % (1.0 / bf)) if ref.best_duration > 0.0 else ref.best_t0
+        return dataclasses.replace(ref, best_t0=t0)
+
+    return refine
+
+
+def _shift_bands(
+    bands: Mapping[str, tuple[Array, Array, Array]], offset: float
+) -> dict[str, tuple[Array, Array, Array]]:
+    """Return ``bands`` with ``offset`` subtracted from every band's times."""
+    return {k: (np.asarray(t, dtype=np.float64) - offset, y, dy) for k, (t, y, dy) in bands.items()}
+
+
+def _flux_scale(dys: list[Array]) -> float:
+    """Median uncertainty over all bands: the unit the float32 GPU kernels work in."""
+    return float(np.median(np.concatenate([np.asarray(d, dtype=np.float64) for d in dys])))
+
+
+def _scale_bands(
+    bands: Mapping[str, tuple[Array, Array, Array]], scale: float
+) -> dict[str, tuple[Array, Array, Array]]:
+    """Return ``bands`` with ``y`` and ``dy`` divided by ``scale`` (power is invariant)."""
+    return {k: (t, np.asarray(y, dtype=np.float64) / scale,
+                np.asarray(dy, dtype=np.float64) / scale) for k, (t, y, dy) in bands.items()}
+
+
 def _result(
     power_raw: np.ndarray,
     chi2_flat: float,
@@ -465,6 +502,11 @@ def _coarse_to_fine(
     nf = freqs.size
     if coarse_factor <= 1 or nf < 4 * coarse_factor:
         return evaluate(freqs)
+    if np.any(np.diff(freqs) <= 0.0):  # interpolation and the refine bands need ascending order
+        order = np.argsort(freqs, kind="stable")
+        out = np.empty(nf)
+        out[order] = _coarse_to_fine(evaluate, freqs[order], coarse_factor, n_refine)
+        return out
     idx_c = np.arange(0, nf, coarse_factor)
     if idx_c[-1] != nf - 1:
         idx_c = np.append(idx_c, nf - 1)
@@ -550,7 +592,8 @@ def eebls_fast(
     n_threads = _check_n_threads(n_threads, "eebls_fast")
     coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine, "eebls_fast")
     wx, w_hat, yy = _preprocess_single(y, dy)
-    tc = np.ascontiguousarray(t - np.median(t), dtype=np.float64)
+    t_offset = float(np.median(t))
+    tc = np.ascontiguousarray(t - t_offset, dtype=np.float64)
     kmi, kma = _grid_params(nbins, q_min, q_max)
     widths = np.ascontiguousarray(_log_widths(kmi, kma, dlogq), dtype=np.int32)
     mp = min(min_points, t.shape[0] + 1)
@@ -561,8 +604,9 @@ def eebls_fast(
     power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, n_threads), freqs,
                             coarse_factor, n_refine)
     return _result(power, yy, freqs,
-                   lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
-                                    q_min=q_min, q_max=q_max, min_points=min_points))
+                   _refine_at(lambda bf: eebls(tc, y, dy, np.array([bf]), nbins=nbins,
+                                               q_min=q_min, q_max=q_max,
+                                               min_points=min_points), t_offset))
 
 
 def multiband_eebls_fast(
@@ -615,7 +659,8 @@ def multiband_eebls_fast(
     coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine, "multiband_eebls_fast")
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     _check_phase_range(t_all, freqs)
-    tc = np.ascontiguousarray(t_all - np.median(t_all), dtype=np.float64)
+    t_offset = float(np.median(t_all))
+    tc = np.ascontiguousarray(t_all - t_offset, dtype=np.float64)
     band_w = np.ascontiguousarray(w_totals, dtype=np.float64)
     kmi, kma = _grid_params(nbins, q_min, q_max)
     widths = np.ascontiguousarray(_log_widths(kmi, kma, dlogq), dtype=np.int32)
@@ -628,8 +673,9 @@ def multiband_eebls_fast(
     power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, n_threads), freqs,
                             coarse_factor, n_refine)
     # bands were already rescaled above: refine on them without rescaling again
+    bands_c = _shift_bands(bands, t_offset)
     return _result(power, chi2_flat, freqs,
-                   lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
-                                              q_min=q_min, q_max=q_max,
-                                              min_points=min_points),
+                   _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]), nbins=nbins,
+                                                         q_min=q_min, q_max=q_max,
+                                                         min_points=min_points), t_offset),
                    bands=labels, band_chi2_red=chi2_red)
