@@ -23,7 +23,7 @@ cnp.import_array()
 
 cdef void _meebls_period(const double* t, const double* wx, const double* w,
                          const cnp.int64_t* band, Py_ssize_t n, int n_bands, int nb,
-                         double period, int kmi, int kma, int min_points,
+                         double period, int kmi, int kma, int min_points, double sign,
                          const double* band_w, const cnp.int64_t* band_n,
                          double* ybin, double* rbin, cnp.int64_t* cbin,
                          double* s, double* r, cnp.int64_t* cnt,
@@ -92,7 +92,7 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
                 if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
-                if denom <= 0.0:
+                if denom <= 0.0 or sign * s[bb] < 0.0:
                     continue
                 sr2 += band_w[bb] * s[bb] * s[bb] / denom
                 kk += 1
@@ -107,7 +107,8 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
                 best_t0 = phi_mid * period
                 for bb in range(n_bands):
                     denom = r[bb] * (1.0 - r[bb])
-                    if cnt[bb] >= 1 and cnt[bb] < band_n[bb] and denom > 0.0:
+                    if (cnt[bb] >= 1 and cnt[bb] < band_n[bb] and denom > 0.0
+                            and sign * s[bb] >= 0.0):
                         depths[bb] = s[bb] / denom
                     else:
                         depths[bb] = NAN
@@ -120,7 +121,8 @@ cdef void _meebls_period(const double* t, const double* wx, const double* w,
 
 def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
                 cnp.int64_t[::1] band, int n_bands, double[::1] freqs, int nb,
-                double qmin, double qmax, int min_points, double[::1] band_w):
+                double qmin, double qmax, int min_points, double[::1] band_w,
+                double sign=0.0):
     """Scan a frequency grid for the binned multiband search.
 
     Inputs are the merged (all-band) arrays: ``t``, ``wx = w_hat * x_tilde`` with
@@ -165,7 +167,7 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
         period = 1.0 / f
         with nogil:
             _meebls_period(&t[0], &wx[0], &w_hat[0], &band[0], n, n_bands, nb,
-                           period, kmi, kma, min_points, &band_w[0], &band_n[0],
+                           period, kmi, kma, min_points, sign, &band_w[0], &band_n[0],
                            &ybin[0], &rbin[0], &cbin[0], &s_buf[0], &r_buf[0],
                            &cnt_buf[0], &dep_buf[0], out)
         pw[fi] = out[0]

@@ -49,6 +49,15 @@ logger = logging.getLogger(__name__)
 Array = npt.NDArray[np.float64]
 
 
+_SIGNS = {"both": 0.0, "positive": 1.0, "negative": -1.0}
+
+def _check_sign(sign: str, name: str) -> float:
+    """Map ``sign`` ('both' | 'positive' | 'negative') to the kernels' -1/0/+1."""
+    if sign not in _SIGNS:
+        raise ValueError(f"{name}: sign must be one of {sorted(_SIGNS)}, got {sign!r}.")
+    return _SIGNS[sign]
+
+
 def _preprocess_single(
     y: Array, dy: Array
 ) -> tuple[Array, Array, float]:
@@ -159,6 +168,7 @@ def eebls(
     q_min: float = 0.01,
     q_max: float = 0.10,
     min_points: int = 3,
+    sign: str = "both",
 ) -> BLSResult:
     """Classic binned BLS with edge-effect handling (Kovacs et al. 2002).
 
@@ -186,6 +196,13 @@ def eebls(
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required.
+    sign :
+        Signal sign to search for: ``"both"`` (default), ``"positive"`` or
+        ``"negative"``. Positive keeps windows whose weighted mean of ``y`` lies above
+        the out-of-window baseline (magnitudes: dimming/eclipse; fluxes: brightening),
+        negative the opposite. In multiband searches the cut is per band: a band whose
+        window has the wrong sign contributes nothing. Costs one multiply-compare per
+        window.
 
     Raises
     ------
@@ -193,6 +210,7 @@ def eebls(
         On invalid input (see :func:`sparse_bls`), ``q_min`` outside
         ``(0, q_max]``, or a non-integer / ``< 1`` ``nbins``.
     """
+    sg = _check_sign(sign, "eebls")
     freqs, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -205,7 +223,7 @@ def eebls(
 
     power, best_freq, t0, dur, depth, sr = _eebls.eebls_grid(
         t, wx, w_hat, freqs, nbins, float(q_min), float(q_max),
-        min_points,
+        min_points, sg,
     )
     return BLSResult(
         frequency=freqs,
@@ -289,6 +307,7 @@ def multiband_eebls(
     q_max: float = 0.10,
     min_points: int = 3,
     rescale_errors: bool = False,
+    sign: str = "both",
 ) -> BLSResult:
     """Binned multiband BLS (compiled). See :func:`reference.multiband_eebls_reference`.
 
@@ -315,7 +334,15 @@ def multiband_eebls(
         Minimum number of in-transit points required across all bands.
     rescale_errors :
         As in :func:`multiband_sparse_bls`.
+    sign :
+        Signal sign to search for: ``"both"`` (default), ``"positive"`` or
+        ``"negative"``. Positive keeps windows whose weighted mean of ``y`` lies above
+        the out-of-window baseline (magnitudes: dimming/eclipse; fluxes: brightening),
+        negative the opposite. In multiband searches the cut is per band: a band whose
+        window has the wrong sign contributes nothing. Costs one multiply-compare per
+        window.
     """
+    sg = _check_sign(sign, "multiband_eebls")
     freqs, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -328,7 +355,7 @@ def multiband_eebls(
 
     power, best_freq, t0, dur, depths, sr, k_used = _meebls.meebls_grid(
         t_all, wx_all, w_all, band_all, len(labels), freqs, nbins,
-        float(q_min), float(q_max), min_points, band_w,
+        float(q_min), float(q_max), min_points, band_w, sg,
     )
     return BLSResult(
         frequency=freqs,
@@ -547,6 +574,7 @@ def eebls_fast(
     n_threads: int = 1,
     coarse_factor: int = 1,
     n_refine: int = 20,
+    sign: str = "both",
 ) -> BLSResult:
     """Fast CPU binned BLS using prefix-sum bins and log-spaced transit widths.
 
@@ -576,6 +604,13 @@ def eebls_fast(
         recovery against the full grid before using it. ``frequency``/``power`` stay
         full length, with unsearched frequencies holding the interpolated coarse
         power.
+    sign :
+        Signal sign to search for: ``"both"`` (default), ``"positive"`` or
+        ``"negative"``. Positive keeps windows whose weighted mean of ``y`` lies above
+        the out-of-window baseline (magnitudes: dimming/eclipse; fluxes: brightening),
+        negative the opposite. In multiband searches the cut is per band: a band whose
+        window has the wrong sign contributes nothing. Costs one multiply-compare per
+        window.
 
     Notes
     -----
@@ -586,6 +621,7 @@ def eebls_fast(
     exactly with :func:`eebls` at the best frequency (on the original times), while
     ``power``/``best_power`` are this search's values.
     """
+    sg = _check_sign(sign, "eebls_fast")
     freqs, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -604,14 +640,14 @@ def eebls_fast(
     mp = min(min_points, t.shape[0] + 1)
 
     def kernel(f: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        return _fast.eebls_fast_grid(tc, wx, w_hat, np.ascontiguousarray(f), nbins, widths, mp)
+        return _fast.eebls_fast_grid(tc, wx, w_hat, np.ascontiguousarray(f), nbins, widths, mp, sg)
 
     power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, n_threads), freqs,
                             coarse_factor, n_refine)
     return _result(power, yy, freqs,
                    _refine_at(lambda bf: eebls(tc, y, dy, np.array([bf]), nbins=nbins,
                                                q_min=q_min, q_max=q_max,
-                                               min_points=min_points), t_offset))
+                                               min_points=min_points, sign=sign), t_offset))
 
 
 def multiband_eebls_fast(
@@ -626,6 +662,7 @@ def multiband_eebls_fast(
     n_threads: int = 1,
     coarse_factor: int = 1,
     n_refine: int = 20,
+    sign: str = "both",
 ) -> BLSResult:
     """Fast CPU binned multiband BLS using prefix-sum bins and log-spaced widths.
 
@@ -643,6 +680,13 @@ def multiband_eebls_fast(
         Number of threads the frequency grid is split over (default 1).
     coarse_factor, n_refine :
         Opt-in coarse-to-fine search, as in :func:`eebls_fast`.
+    sign :
+        Signal sign to search for: ``"both"`` (default), ``"positive"`` or
+        ``"negative"``. Positive keeps windows whose weighted mean of ``y`` lies above
+        the out-of-window baseline (magnitudes: dimming/eclipse; fluxes: brightening),
+        negative the opposite. In multiband searches the cut is per band: a band whose
+        window has the wrong sign contributes nothing. Costs one multiply-compare per
+        window.
 
     Notes
     -----
@@ -653,6 +697,7 @@ def multiband_eebls_fast(
     (same semantics as :func:`multiband_eebls`). ``n_bands_used`` is not computed
     (``None``).
     """
+    sg = _check_sign(sign, "multiband_eebls_fast")
     freqs, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -676,7 +721,7 @@ def multiband_eebls_fast(
     def kernel(f: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         return _fast.meebls_fast_grid(tc, wx_all, w_all, band32, len(labels),
                                       np.ascontiguousarray(f), nbins, widths, mp, band_w,
-                                      band_n)
+                                      band_n, sg)
 
     power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, n_threads), freqs,
                             coarse_factor, n_refine)
@@ -685,5 +730,5 @@ def multiband_eebls_fast(
     return _result(power, chi2_flat, freqs,
                    _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]), nbins=nbins,
                                                          q_min=q_min, q_max=q_max,
-                                                         min_points=min_points), t_offset),
+                                                         min_points=min_points, sign=sign), t_offset),
                    bands=labels, band_chi2_red=chi2_red)

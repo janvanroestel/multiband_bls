@@ -26,7 +26,7 @@ cnp.import_array()
 
 cdef void _eebls_period(const double* t, const double* wx, const double* w,
                         Py_ssize_t n, double period, int nb,
-                        int kmi, int kma, int min_bin_points,
+                        int kmi, int kma, int min_bin_points, double sign,
                         double* ybin, double* rbin, cnp.int64_t* cbin,
                         double* out) noexcept nogil:
     """Fill ``out = [SR, t0, duration, depth]`` for one trial period (box model)."""
@@ -72,6 +72,8 @@ cdef void _eebls_period(const double* t, const double* wx, const double* w,
                 continue
             if cnt >= n:
                 continue  # no out-of-transit point: depth not identifiable
+            if sign * s < 0.0:
+                continue  # wrong-signed window (sign = 0: keep both)
             denom = r * (1.0 - r)
             if denom <= 0.0:
                 continue
@@ -92,7 +94,7 @@ cdef void _eebls_period(const double* t, const double* wx, const double* w,
 
 def eebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
                double[::1] freqs, int nb, double qmin, double qmax,
-               int min_bin_points):
+               int min_bin_points, double sign=0.0):
     """Scan a frequency grid; return ``(power, best_freq, t0, dur, depth, sr)``.
 
     ``nb`` is the number of phase bins; ``qmin``/``qmax`` bound the fractional
@@ -125,7 +127,7 @@ def eebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
         period = 1.0 / f
         with nogil:
             _eebls_period(&t[0], &wx[0], &w_hat[0], n, period, nb,
-                          kmi, kma, min_bin_points,
+                          kmi, kma, min_bin_points, sign,
                           &ybin[0], &rbin[0], &cbin[0], out)
         pw[fi] = out[0]
         if out[0] > best_sr:

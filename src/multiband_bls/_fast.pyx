@@ -41,11 +41,12 @@ cdef extern from "_fast_kernels.h" nogil:
                             const int* band, long n, int n_bands, double f, int nb,
                             double* cy, double* cr, double* cc, double* ct, int* ibuf)
     double mbls_sweep_single(const double* cy, const double* cr, const double* cc, int nb,
-                             const int* widths, int nw, double mp, double nmax, int* idx)
+                             const int* widths, int nw, double mp, double nmax, int* idx,
+                             double sg)
     double mbls_sweep_multi(const double* cy, const double* cr, const double* cc,
                             const double* ct, int n_bands, int nb, const int* widths,
                             int nw, double mp, const double* band_w, const double* band_n,
-                            int* idx, double* acc)
+                            int* idx, double* acc, double sg)
 
 
 cdef _check_phase_int32(double[::1] t, double[::1] freqs):
@@ -58,7 +59,7 @@ cdef _check_phase_int32(double[::1] t, double[::1] freqs):
 
 def eebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
                     double[::1] freqs, int nb, cnp.int32_t[::1] widths,
-                    long long min_points):
+                    long long min_points, double sign=0.0):
     """Periodogram ``SR^2`` of the single-band prefix-sum BLS over ``freqs``.
 
     ``t`` should be median-centred by the caller (as the GPU fast kernels do);
@@ -88,20 +89,21 @@ def eebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
             mbls_prepare_single(&t[0], &wx[0], &w_hat[0], n, freqs[fi], nb,
                                 &cy[0], &cr[0], &cc[0], <int*>&ibuf[0])
             pw[fi] = mbls_sweep_single(&cy[0], &cr[0], &cc[0], nb, <const int*>&widths[0], nw,
-                                       mp, nmax, <int*>&idx[0])
+                                       mp, nmax, <int*>&idx[0], sign)
     return power
 
 
 def meebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
                      cnp.int32_t[::1] band, int n_bands, double[::1] freqs, int nb,
                      cnp.int32_t[::1] widths, long long min_points, double[::1] band_w,
-                     double[::1] band_n):
+                     double[::1] band_n, double sign=0.0):
     """Periodogram ``sum_b W_b s_b^2 / (r_b (1 - r_b))`` of the multiband
     prefix-sum BLS over ``freqs``.
 
     Inputs are the merged (all-band) arrays of :func:`multiband_bls.api._merge_bands`,
     with ``t`` median-centred by the caller. Returns a float64 array of length
-    ``len(freqs)``.
+    ``len(freqs)``. ``sign`` (-1, 0, +1) restricts the sign of each band's window sum
+    (0: both; a wrong-signed band contributes nothing).
     """
     cdef Py_ssize_t nf = freqs.shape[0]
     cdef long n = t.shape[0]
@@ -130,5 +132,5 @@ def meebls_fast_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
                                <int*>&ibuf[0])
             pw[fi] = mbls_sweep_multi(&cy[0], &cr[0], &cc[0], &ct[0], n_bands, nb,
                                       <const int*>&widths[0], nw, mp, &band_w[0], &band_n[0],
-                                      <int*>&idx[0], &acc[0])
+                                      <int*>&idx[0], &acc[0], sign)
     return power
