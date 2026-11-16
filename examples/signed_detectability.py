@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 
-from multiband_bls import multiband_eebls_fast
+from multiband_bls import gpu_available, multiband_eebls_fast, multiband_eebls_gpu_fast
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("signed_detect")
@@ -32,7 +32,7 @@ P_ECL, Q_ECL, SIGMA, BASE = 1.7305, 0.05, 0.05, 20.0
 CHROM = {"u": 1.6, "g": 1.3, "r": 1.0, "i": 0.8, "z": 0.6, "y": 0.5}   # relative depths
 NVIS = {"u": 40, "g": 60, "r": 120, "i": 120, "z": 100, "y": 100}
 FREQS = np.arange(0.40, 1.20, 5e-5)
-N_NOISE, N_TRIAL, FAP = 400, 80, 0.01
+N_NOISE, N_TRIAL, FAP = 1000, 200, 0.01
 DEPTHS = (0.060, 0.070, 0.080, 0.090, 0.100, 0.115)     # r-band depth (mag)
 NT = os.cpu_count() or 1
 OUT = Path(__file__).with_name("signed_detectability.png")
@@ -50,6 +50,9 @@ def make_bands(rng: np.random.Generator, depth: float) -> Bands:
 
 
 def search(bands: Bands, sign: str) -> Array:
+    if gpu_available():
+        return multiband_eebls_gpu_fast(bands, FREQS, q_min=0.03, q_max=0.08, sign=sign,
+                                        compute_n_bands_used=False).power
     return multiband_eebls_fast(bands, FREQS, q_min=0.03, q_max=0.08, sign=sign,
                                 n_threads=NT).power
 
