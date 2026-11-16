@@ -6,7 +6,8 @@ of the grid-maximum power over pure-noise light curves with the same sampling.
 Because a signed search only has to beat noise of one sign, its threshold is lower;
 there is a narrow range of eclipse depths that clears the signed but not the
 unsigned threshold. Panels: (a) noise-maximum distributions and thresholds,
-(b) detection fraction vs depth, (c) periodograms of one example light curve.
+(b) detection fraction vs depth, (c) periodograms of one example light curve, (d) that light curve folded at the
+signed search's best period and epoch (each band scaled to the r-band depth).
 """
 from __future__ import annotations
 
@@ -92,7 +93,8 @@ def main() -> None:
     if example is None:
         raise SystemExit("no example light curve found; adjust DEPTHS")
 
-    fig, ax = plt.subplots(1, 3, figsize=(16, 4.6))
+    fig, axs = plt.subplots(2, 2, figsize=(12, 9))
+    ax = axs.ravel()
     bins = np.linspace(min(map(min, noise.values())), max(map(max, noise.values())), 40)
     for s, c, lab in (("both", "k", "unsigned"), ("positive", "tab:blue", 'sign="positive"')):
         ax[0].hist(noise[s], bins, histtype="step", color=c, label=lab)
@@ -112,6 +114,27 @@ def main() -> None:
     ax[2].set_xlabel("period (d)"); ax[2].set_ylabel(r"power $\Delta\chi^2/\chi^2_{flat}$")
     ax[2].set_title(f"(c) one light curve, depth {example[0]:.3f} mag", fontsize=10)
     ax[2].legend(fontsize=8)
+    # (d) folded light curve at the signed search's best period / epoch
+    res = (multiband_eebls_gpu_fast if gpu_available() else multiband_eebls_fast)(
+        example[1], FREQS, q_min=0.03, q_max=0.08, sign="positive")
+    P = res.best_period
+    ph_all, dev_all = [], []
+    for b, (t, y, _) in example[1].items():
+        ph = ((t - res.best_t0) / P + 0.5) % 1.0 - 0.5
+        dev = (y - np.median(y[np.abs(ph) > Q_ECL])) / CHROM[b]
+        ph_all.append(ph); dev_all.append(dev)
+        ax[3].plot(ph, dev, ".", ms=3, alpha=0.35, color="gray")
+    ph_c, dev_c = np.concatenate(ph_all), np.concatenate(dev_all)
+    edges = np.linspace(-0.5, 0.5, 41)
+    idx = np.digitize(ph_c, edges) - 1
+    mid = 0.5 * (edges[1:] + edges[:-1])
+    mean = np.array([dev_c[idx == k].mean() if np.any(idx == k) else np.nan for k in range(40)])
+    ax[3].plot(mid, mean, "o-", color="tab:blue", ms=4, label="binned mean")
+    ax[3].axvspan(-Q_ECL / 2, Q_ECL / 2, color="tab:red", alpha=0.12, zorder=0)
+    ax[3].set_ylim(0.2, -0.2); ax[3].set_xlabel("phase")
+    ax[3].set_ylabel("mag - baseline, scaled to r (brighter up)")
+    ax[3].set_title(f"(d) folded at P = {P:.4f} d (red band = true eclipse)", fontsize=10)
+    ax[3].legend(fontsize=8)
     fig.tight_layout(); fig.savefig(OUT, dpi=150)
     log.info("saved %s", OUT)
 
