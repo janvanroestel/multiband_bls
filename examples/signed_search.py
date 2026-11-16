@@ -68,9 +68,9 @@ def main() -> None:
     for i, (s, title) in enumerate((("both", "unsigned"), ("positive", 'sign="positive" (dimmings)'),
                                     ("negative", 'sign="negative" (brightenings)'))):
         ax = fig.add_subplot(gs[i, 0]); r = res[s]
-        ax.plot(1 / r.frequency, r.power, lw=0.7, color="k")
-        ax.axvline(P_ECL, color="tab:blue", ls="--", lw=1, label="true eclipse")
-        ax.axvline(P_BRT, color="tab:orange", ls="--", lw=1, label="true brightening")
+        ax.plot(1 / r.frequency, r.power, lw=0.7, color="k", zorder=3)
+        ax.axvline(P_ECL, color="tab:blue", ls="--", lw=1.5, alpha=0.6, zorder=1, label="true eclipse")
+        ax.axvline(P_BRT, color="tab:orange", ls="--", lw=1.5, alpha=0.6, zorder=1, label="true brightening")
         ax.set_xscale("log"); ax.set_ylim(0, max(res["both"].power.max() * 1.1, 0.05))
         ax.set_xlabel("period (d)"); ax.set_ylabel(r"power $\Delta\chi^2/\chi^2_{flat}$")
         ax.set_title(title, fontsize=10)
