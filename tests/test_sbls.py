@@ -1648,3 +1648,34 @@ def test_sign_invalid_raises(fn):
     _, _, (t, y, dy), freqs = _signed_single()
     with pytest.raises(ValueError, match="sign"):
         fn(t, y, dy, freqs, sign="up")
+
+
+# --------------------------------------------------------------------------- #
+# Signed search on the GPU                                                     #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.skipif(not gpu_available(), reason="no GPU")
+@pytest.mark.parametrize("sgn", ["positive", "negative"])
+def test_sign_gpu_matches_cpu(sgn):
+    bands, truth, (t, y, dy), freqs = _signed_single()
+    f = np.linspace(0.3, 0.6, 300)
+    np.testing.assert_allclose(eebls_gpu(t, y, dy, f, sign=sgn).power,
+                               eebls(t, y, dy, f, sign=sgn).power, rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(multiband_eebls_gpu(bands, f, sign=sgn).power,
+                               multiband_eebls(bands, f, sign=sgn).power, rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(eebls_gpu_fast(t, y, dy, f, sign=sgn).power,
+                               eebls_fast(t, y, dy, f, sign=sgn).power, rtol=2e-3, atol=1e-4)
+    np.testing.assert_allclose(multiband_eebls_gpu_fast(bands, f, sign=sgn).power,
+                               multiband_eebls_fast(bands, f, sign=sgn).power,
+                               rtol=2e-3, atol=1e-4)
+
+
+@pytest.mark.skipif(not gpu_available(), reason="no GPU")
+def test_sign_gpu_selects_and_validates():
+    bands, truth, (t, y, dy), _ = _signed_single()
+    f = np.array([1.0 / truth.period])
+    for fn, arg in ((eebls_gpu, (t, y, dy, f)), (eebls_gpu_fast, (t, y, dy, f)),
+                    (multiband_eebls_gpu, (bands, f)), (multiband_eebls_gpu_fast, (bands, f))):
+        assert fn(*arg, sign="positive").best_power > 5 * fn(*arg, sign="negative").best_power
+        with pytest.raises(ValueError, match="sign"):
+            fn(*arg, sign="up")
