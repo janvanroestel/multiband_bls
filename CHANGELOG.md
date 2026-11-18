@@ -37,6 +37,12 @@
 - `multiband_sparse_bls` updates the combined statistic incrementally (O(1) per window
   extension instead of O(bands)): about 1.6x faster with 6 bands, 2.7x with 12.
 
+- GPU multiband kernels are compiled per band count (`-DNB`), which removes local-memory
+  spills (256 B/thread exact, 32 B/thread fast) and makes the fast kernel about 10-18%
+  faster. The fast kernel's launch-bounds hint now follows the shared memory per block
+  instead of a fixed 4 blocks per SM (about 11% faster kernel time at 6-8 bands, 500
+  bins). Results are unchanged up to atomic-ordering noise.
+
 ### Fixed
 
 - Coarse-to-fine search no longer recurses forever when the frequency grid contains
