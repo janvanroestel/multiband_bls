@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multiband_bls"
-version = "0.2.0"
+version = "0.3.0"
 description = "Sparse BLS and multiband Sparse BLS for VRO/LSST light curves"
 readme = "README.md"
 license = {text = "MIT"}

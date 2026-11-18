@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-19
+
 ### Changed
 
 - `DensityPrior.q_step` default 1.25 -> 1.05: segment width ranges follow the allowed band more closely (less overshoot) at no measured cost; density-prior power values change slightly.
