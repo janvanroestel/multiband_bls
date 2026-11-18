@@ -65,8 +65,21 @@ _FAST_AMP_MIN, _FAST_AMP_MAX = 1e-15, 1e14
 _FAST_WEIGHT_MIN = 1e-30  # smallest normalised point weight the float32 kernels can hold
 
 
-def _check_fast_signal_range(wx: Array, w_hat: Array, name: str) -> None:
+_FAST_SUM_MIN, _FAST_SUM_MAX = 1e-17, 1e18  # weighted sums are squared in float32
+
+
+def _check_fast_signal_range(wx: Array, w_hat: Array, name: str,
+                             w_totals: Array | None = None) -> None:
     """Raise :class:`CapabilityError` unless float32 arithmetic is safe for this signal."""
+    sums = [float(np.max(np.abs(wx)))] if wx.size else []
+    if w_totals is not None and np.size(w_totals):
+        sums += [float(np.min(w_totals)), float(np.max(w_totals))]
+    if any(v != 0.0 and not _FAST_SUM_MIN <= v <= _FAST_SUM_MAX for v in sums):
+        raise CapabilityError(
+            f"{name}: weighted sums fall outside the float32-safe range "
+            f"[{_FAST_SUM_MIN:g}, {_FAST_SUM_MAX:g}] of the fast kernels (heteroscedastic "
+            "uncertainties span too many orders of magnitude); use the binned GPU or CPU search."
+        )
     amp = float(np.max(np.abs(wx) / w_hat)) if wx.size else 0.0
     if amp != 0.0 and not _FAST_AMP_MIN <= amp <= _FAST_AMP_MAX:
         raise CapabilityError(
@@ -319,7 +332,7 @@ class FastGpuMulti(_GpuBase):
         # lazily in refine(), once per search, as the legacy refit did.
         t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(
             _scale_bands(bands, f_scale))
-        _check_fast_signal_range(wx_all, w_all, self.fname)
+        _check_fast_signal_range(wx_all, w_all, self.fname, w_totals)
         n_bands = len(labels)
         if n_bands > _k._MAX_BANDS:
             raise CapabilityError(f"GPU multiband kernel supports up to {_k._MAX_BANDS} bands")

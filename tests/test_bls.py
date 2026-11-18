@@ -560,3 +560,24 @@ def test_gpu_fast_rejects_signals_outside_float32_range(amp):
     # the exact (float64) GPU search has no such limit
     exact = bls((t, y, dy), f, method="binned", backend="gpu", config=cfg)
     assert np.isfinite(exact.power[0]) and exact.power[0] > 0.0
+
+
+def test_gpu_fast_rejects_extreme_weight_ranges():
+    """Heteroscedastic weights whose sums leave the float32 range must not give inf/0 power."""
+    if not mb.gpu_available():
+        pytest.skip("no GPU")
+    from multiband_bls.engine import CapabilityError
+
+    f = np.array([1.0])
+    cfg = SearchConfig(nbins=20, q_min=0.05, q_max=0.1, min_points=1)
+    t = np.array([0.0, 0.1, 0.3, 0.5, 0.7, 0.9])
+    y = np.array([1.0, 0, 0, 0, 0, 0])
+    dy = np.array([1e14, 1, 1, 1, 1, 1.0])
+    with pytest.raises(CapabilityError, match="float32"):
+        bls((t, y, dy), f, method="fast", backend="gpu", config=cfg)
+    bands = {"a": (t, np.array([1e-25, 0, 0, 0, 0, 0]), np.full(6, 1e-25)),
+             "b": (t + 0.003, np.array([1.0, 0, 0, 0, 0, 0]), np.ones(6))}
+    with pytest.raises(CapabilityError, match="float32"):
+        bls(bands, f, method="fast", backend="gpu", config=cfg)
+    auto = bls(bands, f, method="fast", backend="auto", config=cfg)
+    assert np.all(np.isfinite(auto.power))

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Fast GPU searches also refuse extreme heteroscedastic weight ranges (weighted sums outside float32); `backend="auto"` falls back to the CPU.
 - `bls()`: one entry point for every search. `bls(data, frequencies | p_min/p_max,
   method="binned" | "fast" | "sparse", backend="cpu" | "gpu" | "auto", config=...)`
   takes `(t, y, dy)` or a mapping of bands and dispatches to the same implementations as
