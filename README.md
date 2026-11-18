@@ -162,6 +162,24 @@ res = bls(bands, p_min=0.1, p_max=10, method="fast",
           config=SearchConfig(density_prior=prior))  # grid and widths follow the prior
 ```
 
+![DensityPrior parameters](figures/density_prior.png)
+
+The figure (in the spirit of Fig. 5 of Hippke & Heller 2019, which restricts the TLS
+search to the populated part of the period--duration plane) shows the duty cycle `q = T/P`
+against period for `DensityPrior(density_range=(0.2, 5.0), duration_range=(0.1, 1.5))`.
+A fixed `(q_min, q_max)` search (grey) covers the same widths at every period; the prior
+(blue) follows `q ∝ P^(-2/3)`:
+
+* `density_range=(rho_min, rho_max)` (solar densities) sets the *central-transit* duty
+  cycle: the dashed line is the least dense host, the dotted line the densest.
+* `duration_range=(eta_lo, eta_hi)` scales that by the allowed duration relative to a
+  central transit: `q_lo` is `rho_max` times `eta_lo` (grazing, high impact parameter) and
+  `q_hi` is `rho_min` times `eta_hi` (companion radius, eccentricity).
+* `q_cap` bounds the duty cycles at short periods, where the transit would otherwise
+  cover a large part of the orbit (and the search become expensive).
+* `q_step` sets how finely the grid is cut: a new segment, with its own width range and
+  bin count (orange), starts once `q_lo` or `q_hi` has grown by this factor.
+
 The grid then has a step that follows the minimum duration (uniform in `f^(1/3)`), 9-70x
 fewer points than a uniform grid resolving the same narrowest box. `res.segments` records
 the width range and bin count used on each stretch of the grid. `power` is maximised over
@@ -351,6 +369,9 @@ largest for wide `q` ranges and many bins.
   (2021), arXiv:2103.06193.
 * G. Kovács, S. Zucker & T. Mazeh, *A box-fitting algorithm in the detection of
   periodic transits*, A&A **391**, 369 (2002).
+* M. Hippke & R. Heller, *Optimized transit detection algorithm to
+  search for periodic transits of small planets* (Transit Least Squares), A&A **623**, A39 (2019),
+  arXiv:1901.02015 -- period-duration prior used for the density-based search.
 * J. VanderPlas & Ž. Ivezić, *Periodograms for Multiband Astronomical Time Series*,
   ApJ **812**, 18 (2015) — multiband shared-shape idea.
 * *cuvarbase* — GPU-accelerated variability tools for astronomy,
