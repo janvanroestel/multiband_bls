@@ -127,6 +127,49 @@ from `t` if needed).
 
 ## Quick start
 
+### One entry point: `bls()`
+
+```python
+from multiband_bls import DensityPrior, SearchConfig, bls
+
+# data: (t, y, dy) for one band, or {label: (t, y, dy)} for several (shared period,
+# epoch and duration; one depth per band)
+res = bls(bands, p_min=0.12, p_max=0.28)                      # exhaustive "binned" search
+res = bls(bands, p_min=0.12, p_max=0.28, method="fast")       # prefix sums, ~10x faster
+print(res.best_period, res.method, res.backend, res.has_solution)
+```
+
+| `method` | what it is | `backend` |
+|---|---|---|
+| `"binned"` (default) | classic phase-binned BLS, exhaustive over integer-bin widths | cpu / gpu |
+| `"fast"` | prefix sums and log-spaced widths: approximate in width resolution, much faster | cpu / gpu |
+| `"sparse"` | unbinned, box edges at observed phases, `O(N²)` per period | cpu only |
+
+`backend="auto"` (the default) uses the GPU when CuPy and a device are available and the
+problem fits its limits, else the CPU -- always the *same method*. The backend actually
+used is recorded in `res.backend`. `SearchConfig` holds `q_min`/`q_max`, `nbins`,
+`min_points` and `sign`, and is shared between grid construction and the search.
+
+**Stellar-density prior.** A transit's duty cycle scales as `P^(-2/3)` for a given host
+density, so a fixed `(q_min, q_max)` tests widths no real transit can have:
+
+```python
+prior = DensityPrior(density_range=(0.2, 5.0))      # solar densities
+res = bls(bands, p_min=0.1, p_max=10, method="fast",
+          config=SearchConfig(density_prior=prior))  # grid and widths follow the prior
+```
+
+The grid then has a step that follows the minimum duration (uniform in `f^(1/3)`), 9-70x
+fewer points than a uniform grid resolving the same narrowest box. `res.segments` records
+the width range and bin count used on each stretch of the grid. `power` is maximised over
+a different width range in each segment, so its noise floor drifts slowly with frequency.
+
+To search the same data repeatedly, `bls_prepare(data, method=..., backend=...)` validates,
+weights (and, on the GPU, uploads) it once from a read-only copy; pass the result to `bls`.
+
+The functions below (`multiband_eebls_fast`, `eebls_gpu`, ...) remain available and are
+what `bls()` dispatches to.
+
 ### CPU (Cython)
 
 ```python
@@ -187,6 +230,15 @@ binned functions.
 | `eebls_gpu_fast(t, y, dy, freqs, nbins, ..., dlogq)` | CUDA | float32 + warp-shuffle variant |
 | `sparse_bls_reference(...)`, `eebls_reference(...)` | Python | reference oracle |
 
+### Front door and configuration
+
+| Name | Import | Purpose |
+|---|---|---|
+| `bls(data, frequencies, method=, backend=, config=)` | `multiband_bls` | any search, one or several bands, CPU or GPU |
+| `bls_prepare(data, method=, backend=)` | `multiband_bls` | validate/weight/upload once for repeated `bls` calls |
+| `SearchConfig(q_min, q_max, nbins, min_points, sign, density_prior)` | `multiband_bls` | search settings shared by grid and search |
+| `DensityPrior(density_range, duration_range, q_cap, q_step)` | `multiband_bls` | period-dependent duration range and grid from a stellar-density range |
+
 ### Helpers
 
 | Name | Import | Purpose |
@@ -215,6 +267,9 @@ All entry points return an `BLSResult` dataclass:
 | `bands` | `tuple[str, ...]` or `None` | band labels for multiband results |
 | `n_bands_used` | `ndarray[int64]` or `None` | multiband: bands contributing to each frequency's best window (0 = no window); `None` from `multiband_eebls_gpu_fast(..., compute_n_bands_used=False)` |
 | `band_chi2_red` | `ndarray` or `None` | multiband only: per-band flat-model χ²/dof of the input `dy` |
+| `method`, `backend` | `str` or `None` | the search that produced the result (e.g. `"fast"`, `"cpu"`) |
+| `segments` | `tuple[SegmentRecord, ...]` or `None` | frequency range, `q_min`/`q_max` and `nbins` searched in each segment |
+| `has_solution` | `bool` (property) | `best_power > 0`; says nothing about significance. If False the `best_*` fields refer to the first trial frequency |
 
 ## GPU backend
 

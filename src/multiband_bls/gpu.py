@@ -24,8 +24,8 @@ __all__ = [
 ]
 
 import logging
-from importlib import resources
 from collections.abc import Mapping
+from importlib import resources
 from typing import Any
 
 import numpy as np

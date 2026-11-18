@@ -4,17 +4,37 @@
 
 ### Added
 
-- Density-based search (`density_bls`, `density_duration_bounds`,
-  `density_frequency_grid`). A transit lasts `q = T/P ∝ P^(-2/3)` for a given stellar
-  density, so a fixed `(q_min, q_max)` tests widths no real transit can have.
-  `density_bls(search, *data, frequencies=..., density_range=(rho_min, rho_max))` wraps
-  any search function (binned, fast, sparse, multiband, GPU), cuts the grid into
-  segments of slowly varying duty cycle and runs each with its own `q_min`, `q_max` and
-  `nbins`. `density_frequency_grid` builds a grid whose step follows the minimum
-  duration (uniform in `f^(1/3)`): 9-70x fewer points than a uniform grid resolving the
-  same narrowest box for 3-year baselines and period ranges of 0.1-10 d to 30 s-1 d.
-  `power` is maximised over a different width range in each segment, so its noise
+- `bls()`: one entry point for every search. `bls(data, frequencies | p_min/p_max,
+  method="binned" | "fast" | "sparse", backend="cpu" | "gpu" | "auto", config=...)`
+  takes `(t, y, dy)` or a mapping of bands and dispatches to the same implementations as
+  the existing functions (output identical, enforced by golden-output tests).
+  `backend="auto"` falls back to the CPU, keeping the method, only when the GPU reports a
+  capability limit. `bls_prepare()` returns a read-only snapshot of the validated,
+  weighted (and uploaded) data for repeated searches.
+- `SearchConfig` (durations, `nbins`, `min_points`, `sign`; unset `q_min`/`q_max` resolve
+  per method) and `DensityPrior`: a stellar-density-based duration range. A transit lasts
+  `q = T/P ∝ P^(-2/3)` for a given density, so a fixed `(q_min, q_max)` tests widths no
+  real transit can have. With `SearchConfig(density_prior=DensityPrior((rho_min, rho_max)))`
+  the frequency grid is cut into segments of slowly varying duty cycle, each searched with
+  its own `q_min`, `q_max` and `nbins`, and `bls(p_min=, p_max=)` builds a grid whose step
+  follows the minimum duration (uniform in `f^(1/3)`): 9-70x fewer points than a uniform
+  grid resolving the same narrowest box for 3-year baselines and period ranges of
+  0.1-10 d to 30 s-1 d (`density_duration_bounds` and `density_frequency_grid` expose the
+  pieces). `power` is maximised over a different width range in each segment, so its noise
   floor drifts slowly with frequency.
+- `BLSResult.method`, `.backend`, `.segments` (the widths and bins actually searched) and
+  `.has_solution` (`best_power > 0`).
+- A segment search preprocesses and merges the data once and does one exact best-fit refit
+  at the global peak; previously each refinement re-validated and re-preprocessed.
+
+### Changed (internal; public names and results unchanged)
+
+- The ten search functions are thin wrappers over a backend contract (`engine.py`,
+  `backends/`): `prepare` once, `run` per frequency segment, `refine` once. `reference.py`
+  now holds only the pure-Python oracles; validation, weights, band merging and grids moved
+  to `_validate`, `_weights`, `_prep`, `grids`, and `BLSResult` to `result` (the old import
+  paths still work). The CUDA sources moved from Python strings to `kernels/*.cu` (package
+  data, byte-identical). The test suite is split by topic.
 - `eebls_fast` and `multiband_eebls_fast`: CPU counterparts of the `*_gpu_fast`
   entry points (prefix-sum phase bins, log-spaced widths via `dlogq`) in a new
   Cython core `_fast.pyx`, in double precision. The frequency loop runs without the
