@@ -182,8 +182,10 @@ A fixed `(q_min, q_max)` search (grey) covers the same widths at every period; t
   falling as `P^(-2/3)` (for the prior shown, about 0.001 at P = 10 d and 0.0002 at 100 d), so the search resolves ever narrower
   boxes. A floor, e.g. `q_floor=0.005`, stops that where such transits are not detectable
   and coarsens the grid accordingly; it must not exceed `q_cap`.
-* `q_step` sets how finely the grid is cut: a new segment, with its own width range and
-  bin count (orange), starts once `q_lo` or `q_hi` has grown by this factor.
+* `q_step` (default 1.05) sets how finely the grid is cut: a new segment, with its own
+  width range and bin count (orange), starts once `q_lo` or `q_hi` has grown by this factor.
+  Segments are cheap: on a 710k-frequency test, 1.02 (158 segments) ran as fast as 1.25
+  (14 segments), with the same noise floor and recovery.
 
 The grid then has a step that follows the minimum duration (uniform in `f^(1/3)`), 9-70x
 fewer points than a uniform grid resolving the same narrowest box. `res.segments` records

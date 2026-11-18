@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `DensityPrior.q_step` default 1.25 -> 1.05: segment width ranges follow the allowed band more closely (less overshoot) at no measured cost; density-prior power values change slightly.
+
 ### Added
 
 - `DensityPrior(q_floor=...)`: optional lower limit on the duty-cycle range (default `None`, results unchanged); also accepted by `density_duration_bounds` and `density_frequency_grid`.

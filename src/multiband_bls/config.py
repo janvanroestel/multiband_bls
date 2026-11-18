@@ -61,7 +61,7 @@ class DensityPrior:
     density_range: tuple[float, float]
     duration_range: tuple[float, float] = (0.1, 1.5)
     q_cap: float = 0.25
-    q_step: float = 1.25
+    q_step: float = 1.05
     q_floor: float | None = None
 
     def __post_init__(self) -> None:
