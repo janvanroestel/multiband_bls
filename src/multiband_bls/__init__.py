@@ -47,6 +47,7 @@ from .reference import (
     multiband_sparse_bls_reference,
     sparse_bls_reference,
 )
+from .search import PreparedData  # a plain dataclass: importable without the compiled cores
 
 try:  # compiled cores are optional until the extension is built
     from .api import (
@@ -57,7 +58,7 @@ try:  # compiled cores are optional until the extension is built
         multiband_sparse_bls,
         sparse_bls,
     )
-    from .search import PreparedData, bls, bls_prepare
+    from .search import bls, bls_prepare
 except ImportError:  # pragma: no cover
     import warnings
 

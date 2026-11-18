@@ -282,6 +282,10 @@ def test_missing_compiled_cores_fall_back_to_reference():
         "    import multiband_bls as m\n"
         "assert m.sparse_bls is m.sparse_bls_reference and m.eebls is m.eebls_reference\n"
         "assert any('Cython' in str(x.message) for x in w)\n"
+        "missing = [n for n in m.__all__ if not hasattr(m, n)]\n"
+        "assert not missing, missing\n"
+        "ns = {}\n"
+        "exec('from multiband_bls import *', ns)\n"
         "for fn in (m.bls, m.eebls_fast, m.eebls_gpu):\n"
         "    try:\n"
         "        fn(None)\n"
@@ -350,3 +354,42 @@ def test_bls_validates_n_threads_for_fast(bad):
     with pytest.raises(ValueError, match="n_threads"):
         bls(S, F, method="fast", backend="auto", n_threads=bad)
     bls(S, F, method="binned", backend="cpu", n_threads=bad)  # unused by other methods
+
+
+def test_legacy_wrappers_record_their_options():
+    res = mb.multiband_eebls(B, F, rescale_errors=True, sign="negative", min_points=5)
+    assert res.options.rescale_errors and res.options.sign == "negative"
+    assert res.options.min_points == 5 and res.options.requested_backend == "cpu"
+    assert not mb.multiband_eebls(B, F).options.rescale_errors
+    fast = mb.multiband_eebls_fast(B, F, coarse_factor=3, dlogq=0.2, rescale_errors=True)
+    assert fast.options.coarse_factor == 3 and fast.options.dlogq == 0.2
+    assert fast.options.rescale_errors
+    if mb.gpu_available():
+        g = mb.multiband_eebls_gpu_fast(B, F, rescale_errors=True)
+        assert g.options.rescale_errors and g.options.requested_backend == "gpu"
+
+
+@pytest.mark.gpu
+def test_gpu_multi_segment_search_preprocesses_once(monkeypatch):
+    if not mb.gpu_available():
+        pytest.skip("no GPU")
+    from multiband_bls.backends import gpu as bgpu
+
+    counts = {"merge": 0, "single": 0, "prepare": 0}
+    for name, key in (("_merge_bands", "merge"), ("_preprocess_single", "single"),
+                      ("_prepare_bands", "prepare")):
+        orig = getattr(bgpu, name)
+
+        def wrapped(*a, _orig=orig, _key=key, **k):
+            counts[_key] += 1
+            return _orig(*a, **k)
+
+        monkeypatch.setattr(bgpu, name, wrapped)
+    cfg = SearchConfig(density_prior=DensityPrior((0.2, 5.0)))
+    f = np.geomspace(0.5, 20.0, 600)
+    res = bls(B, f, method="fast", backend="gpu", config=cfg)
+    assert len(res.segments) > 5
+    assert counts == {"merge": 1, "single": 0, "prepare": 1}
+    counts.update(merge=0, single=0, prepare=0)
+    bls(S, f, method="fast", backend="gpu", config=cfg)
+    assert counts["single"] == 1 and counts["merge"] == 0

@@ -36,7 +36,7 @@ from ._prep import auto_nbins
 from ._validate import _check_sign, _validate_search_params
 from .backends import get_implementation
 from .engine import RunOptions, SegmentSpec, execute
-from .result import BLSResult
+from .result import BLSResult, SearchOptions
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,8 @@ def _search(
     """Prepare ``data`` once and run a single-segment search (the legacy entry points)."""
     impl = get_implementation(method, backend, multiband)
     prep = impl.prepare(data, rescale_errors)  # type: ignore[attr-defined]
-    return execute(impl, prep, freqs, [(slice(None), spec)], opts)
+    info = SearchOptions(rescale_errors=rescale_errors, requested_backend=backend)
+    return execute(impl, prep, freqs, [(slice(None), spec)], opts, info)
 
 
 
