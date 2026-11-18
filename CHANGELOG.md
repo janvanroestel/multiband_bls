@@ -33,6 +33,11 @@
 - Fixed: the CPU binned searches (`eebls`, `multiband_eebls`) returned all-zero power
   when `[q_min, q_max]` contains no whole number of bins; every backend now raises
   `ValueError`, as the fast and GPU searches already did.
+- Fixed: the fast GPU searches silently returned corrupted power (infinite or zero) when
+  the mean-subtracted signal exceeded roughly 1e14 or fell below 1e-15 median
+  uncertainties, because squared window sums leave the float32 range. They now raise
+  `ValueError` (`CapabilityError`), `bls(backend="auto")` falls back to the CPU, and the
+  exact GPU and CPU searches are unaffected.
 - A segment search preprocesses and merges the data once and does one exact best-fit refit
   at the global peak; previously each refinement re-validated and re-preprocessed.
 

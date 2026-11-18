@@ -533,3 +533,30 @@ def test_config_bounds_use_the_shared_numeric_validation(bad):
         bls(S, F, method="binned", backend="cpu", config=SearchConfig(q_max=bad))
     with pytest.raises(ValueError, match="q_min"):
         mb.eebls(*S, F, q_min=bad)  # the legacy wrapper rejects the same values
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("amp", [1e25, 1e-25])
+def test_gpu_fast_rejects_signals_outside_float32_range(amp):
+    """Squared window sums overflow (1e25) or flush to zero (1e-25) in float32: the fast GPU
+    kernels must refuse, and backend='auto' must fall back to the CPU with a sane answer."""
+    if not mb.gpu_available():
+        pytest.skip("no GPU")
+    from multiband_bls.engine import CapabilityError
+
+    t = np.array([0.0, 0.01, 0.02, 0.4, 0.5, 0.6])
+    y = np.array([amp, amp, amp, 0.0, 0.0, 0.0])
+    dy = np.ones(6)
+    f = np.array([1.0])
+    cfg = SearchConfig(nbins=20, q_min=0.05, q_max=0.4, min_points=1)
+    for data in ((t, y, dy), {"a": (t, y, dy), "b": (t + 0.003, y, dy)}):
+        with pytest.raises(CapabilityError, match="float32"):
+            bls(data, f, method="fast", backend="gpu", config=cfg)
+        auto = bls(data, f, method="fast", backend="auto", config=cfg)
+        assert auto.backend == "cpu" and "GPU limit" in auto.options.fallback
+        assert np.all(np.isfinite(auto.power)) and auto.power[0] > 0.0
+    with pytest.raises(ValueError, match="float32"):
+        mb.eebls_gpu_fast(t, y, dy, f, nbins=20, q_min=0.05, q_max=0.4, min_points=1)
+    # the exact (float64) GPU search has no such limit
+    exact = bls((t, y, dy), f, method="binned", backend="gpu", config=cfg)
+    assert np.isfinite(exact.power[0]) and exact.power[0] > 0.0

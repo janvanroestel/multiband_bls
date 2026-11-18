@@ -56,6 +56,31 @@ class _GpuPrep(Prepared):
         self.host: dict[str, Any] = {}
 
 
+# The fast kernels keep window sums and their squares in float32 (range ~1e-38..3e38). In
+# units of the median uncertainty the mean-subtracted signal must therefore stay within
+# these bounds (squares of sums <= amp**2 / min(r(1-r)) must neither overflow nor flush to
+# zero); conservative, since anything beyond them is either a hopeless signal-to-noise or an
+# absurd amplitude. The CPU searches have no such limit and ``backend="auto"`` falls back.
+_FAST_AMP_MIN, _FAST_AMP_MAX = 1e-15, 1e14
+_FAST_WEIGHT_MIN = 1e-30  # smallest normalised point weight the float32 kernels can hold
+
+
+def _check_fast_signal_range(wx: Array, w_hat: Array, name: str) -> None:
+    """Raise :class:`CapabilityError` unless float32 arithmetic is safe for this signal."""
+    amp = float(np.max(np.abs(wx) / w_hat)) if wx.size else 0.0
+    if amp != 0.0 and not _FAST_AMP_MIN <= amp <= _FAST_AMP_MAX:
+        raise CapabilityError(
+            f"{name}: the mean-subtracted signal reaches {amp:.3g} median uncertainties, "
+            f"outside the float32-safe range [{_FAST_AMP_MIN:g}, {_FAST_AMP_MAX:g}] (squared "
+            "window sums would overflow or flush to zero); use the binned GPU or CPU search."
+        )
+    if wx.size and float(np.min(w_hat)) < _FAST_WEIGHT_MIN:
+        raise CapabilityError(
+            f"{name}: point weights span more than the float32 range of the fast kernels; "
+            "use the binned GPU or CPU search."
+        )
+
+
 def _shift_epoch(t0: float, dur: float, freq: float, offset: float) -> float:
     return float((t0 + offset) % (1.0 / freq)) if dur > 0.0 else float(t0)
 
@@ -211,6 +236,7 @@ class FastGpuSingle(_GpuBase):
         # lazily in refine(), once per search, as the legacy refit did.
         wx, w_hat, yy = _preprocess_single(np.asarray(y, dtype=np.float64) / f_scale,
                                            np.asarray(dy, dtype=np.float64) / f_scale)
+        _check_fast_signal_range(wx, w_hat, self.fname)
         # Subtract the median so large JD values keep full precision in the two-float split.
         t_offset = float(np.median(t))
         t_hi, t_lo = _k._split_time(np.asarray(t, dtype=np.float64) - t_offset)
@@ -293,6 +319,7 @@ class FastGpuMulti(_GpuBase):
         # lazily in refine(), once per search, as the legacy refit did.
         t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(
             _scale_bands(bands, f_scale))
+        _check_fast_signal_range(wx_all, w_all, self.fname)
         n_bands = len(labels)
         if n_bands > _k._MAX_BANDS:
             raise CapabilityError(f"GPU multiband kernel supports up to {_k._MAX_BANDS} bands")
