@@ -50,6 +50,7 @@ down-weight exactly the bands with the strongest eclipses; use it with care.
 
 | Backend | Functions | Requirement |
 |---|---|---|
+| **Front door** | `bls` (dispatches to the functions below by `method` and `backend`), `bls_prepare` | the backend you select |
 | **Cython (CPU)** | `sparse_bls`, `eebls`, `multiband_sparse_bls`, `multiband_eebls`, `eebls_fast`, `multiband_eebls_fast` | C compiler, Cython ≥ 3 |
 | **CUDA (GPU)** | `eebls_gpu`, `eebls_gpu_fast`, `multiband_eebls_gpu`, `multiband_eebls_gpu_fast` | CuPy + CUDA GPU |
 | Pure Python (reference) | `sparse_bls_reference`, `eebls_reference`, `multiband_sparse_bls_reference`, `multiband_eebls_reference` | NumPy only |
@@ -65,8 +66,10 @@ Prebuilt wheels target Linux x86-64, CPython 3.10–3.13. On other platforms `pi
 builds from the source distribution, which needs a C compiler (the build always
 compiles the Cython cores; Windows is untested). If the compiled cores cannot be
 imported — e.g. when running from a source checkout without building — the four
-CPU search functions fall back to the pure-Python reference implementations
-(~100× slower) with a warning.
+exact CPU search functions (`sparse_bls`, `multiband_sparse_bls`, `eebls`,
+`multiband_eebls`) fall back to the pure-Python reference implementations (~100× slower)
+with a warning. `bls`, `bls_prepare`, `eebls_fast`, `multiband_eebls_fast` and the GPU
+functions have no pure-Python version and raise `ImportError` when called.
 
 GPU support requires CuPy; install separately for your CUDA version:
 ```bash
