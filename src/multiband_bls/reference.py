@@ -39,6 +39,7 @@ __all__ = [
 ]
 
 import logging
+import math
 import warnings
 from collections.abc import Mapping
 from typing import cast
@@ -328,6 +329,33 @@ def _prepare_bands(
     return prepared, chi2_red
 
 
+_SIGNS = {"both": 0.0, "positive": 1.0, "negative": -1.0}
+
+
+def _check_sign(sign: str, name: str) -> float:
+    """Map ``sign`` ('both' | 'positive' | 'negative') to the kernels' -1/0/+1."""
+    if sign not in _SIGNS:
+        raise ValueError(f"{name}: sign must be one of {sorted(_SIGNS)}, got {sign!r}.")
+    return _SIGNS[sign]
+
+
+def width_bounds(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
+    """Smallest and largest window width (in bins) with ``q_min <= w/nbins <= q_max``.
+
+    Uses ceil for the lower and floor for the upper bound (with a tiny tolerance for
+    float noise such as ``0.07 * 100 = 7.000000000000001``). Raises ``ValueError`` if
+    no integer width fits, which means ``nbins`` is too small for the duration range.
+    """
+    kmi = max(1, math.ceil(q_min * nbins - 1e-9))
+    kma = min(nbins, math.floor(q_max * nbins + 1e-9))
+    if kma < kmi:
+        raise ValueError(
+            f"no window width fits q_min={q_min}, q_max={q_max} with nbins={nbins}; "
+            "increase nbins or widen the duration range."
+        )
+    return kmi, kma
+
+
 def auto_nbins(q_min: float, n_res: int = 5) -> int:
     """Return the recommended number of phase bins for a given minimum transit fraction.
 
@@ -506,14 +534,18 @@ def _single_period(
     wx_sorted: Array,
     w_sorted: Array,
     period: float,
+    q_min: float,
     q_max: float,
     min_points: int,
+    sign: float = 0.0,
 ) -> tuple[float, float, float, float]:
     """Best ``(SR, t0, duration, depth)`` for one trial period.
 
     The block of in-transit points is a contiguous run (with wrap-around) in
     phase-sorted order, starting at ``i1`` and grown by adding successive
-    points until the duration exceeds ``q_max``.
+    points until the duration exceeds ``q_max``. Windows shorter than ``q_min``
+    or whose signed flux sum has the wrong ``sign`` (-1/0/+1; 0 keeps both) are
+    skipped.
     """
     n = phi_sorted.shape[0]
     best_sr = 0.0
@@ -537,8 +569,10 @@ def _single_period(
                 break
             if phi_sorted[(i2 + 1) % n] == phi_sorted[i2]:
                 continue  # egress edge would split identical phases
-            if cnt < min_points:
+            if frac < q_min or cnt < min_points:
                 continue
+            if sign * s < 0.0:
+                continue  # wrong-signed window (sign = 0: keep both)
             denom = r * (1.0 - r)
             if denom <= 0.0:
                 continue
@@ -557,8 +591,10 @@ def sparse_bls_reference(
     y: Array,
     dy: Array,
     frequencies: Array,
+    q_min: float = 0.01,
     q_max: float = 0.15,
     min_points: int = 3,
+    sign: str = "both",
 ) -> BLSResult:
     """Single-band Sparse BLS (pure-Python reference).
 
@@ -571,16 +607,22 @@ def sparse_bls_reference(
         Times (days), magnitudes (or fluxes), and 1-sigma uncertainties.
     frequencies:
         Trial frequencies (1/day).
-    q_max:
-        Maximum transit duration as a fraction of the period.
+    q_min, q_max:
+        Minimum and maximum transit duration as a fraction of the period. The
+        duration of a window is measured between the midpoints of the gaps to its
+        neighbouring points. Note the default ``q_max`` (0.15) differs from the
+        binned variants' (0.10).
     min_points:
         Minimum number of in-transit points required (paper uses 3).
-
-    Unlike the binned variants there is no minimum duration (``q_min``):
-    ``min_points`` is the only guard against ultra-narrow boxes.
+    sign:
+        ``"both"`` (default), ``"positive"`` or ``"negative"``: only windows whose
+        signed weighted flux sum has that sign contribute (see :func:`eebls`).
     """
     t, y, dy = _validate_light_curve(t, y, dy)
-    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    sg = _check_sign(sign, "sparse_bls")
+    freqs, min_points, _ = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min
+    )
     _check_phase_range(t, freqs)
     w_hat, x_tilde, _ = preprocess(y, dy)
     wx = w_hat * x_tilde
@@ -594,7 +636,7 @@ def sparse_bls_reference(
         phi = (t % period) / period
         order = np.argsort(phi)
         sr, t0, dur, depth = _single_period(
-            phi[order], wx[order], w_hat[order], period, q_max, min_points
+            phi[order], wx[order], w_hat[order], period, q_min, q_max, min_points, sg
         )
         power[idx] = sr
         if sr > best["sr"]:
@@ -623,10 +665,12 @@ def _multiband_period(
     band_sorted: Array,
     n_bands: int,
     period: float,
+    q_min: float,
     q_max: float,
     min_points: int,
     band_w: Array,
     band_n: npt.NDArray[np.int64],
+    sign: float = 0.0,
 ) -> tuple[float, float, float, Array, int]:
     """Best combined ``(SR, t0, duration, depths[n_bands], k)`` for one period.
 
@@ -638,10 +682,17 @@ def _multiband_period(
     and the combined statistic is
     ``sqrt(sum_b band_w[b] * s_b^2 / (r_b (1 - r_b)))``.
 
+    Adding one sample changes only its own band, so each band's contribution is
+    cached and the running total updated in O(1) per extension (instead of
+    re-summing all bands); full depths are extracted only for new best windows.
+    The Cython core performs the same operations in the same order.
+
     ``min_points`` is the minimum *total* number of in-transit points in the
     window; any band with at least one in-transit point (and ``0 < r_b < 1``)
     contributes. This keeps deep but sparsely-sampled bands (e.g. ``u``) in
     play, which is the whole point of a multiband search for WD-MD eclipses.
+    Windows shorter than ``q_min`` are skipped; ``sign`` (-1/0/+1) drops bands
+    whose in-window signed flux sum has the wrong sign.
     """
     n = phi_sorted.shape[0]
     best_sr = 0.0
@@ -656,6 +707,9 @@ def _multiband_period(
         s = np.zeros(n_bands)
         r = np.zeros(n_bands)
         cnt = np.zeros(n_bands, dtype=np.int64)
+        contrib = np.full(n_bands, -1.0)  # cached per-band term; < 0 = not contributing
+        sr2 = 0.0
+        kk = 0
         total = 0
         for k in range(n - 1):
             i2 = (i1 + k) % n
@@ -664,44 +718,52 @@ def _multiband_period(
             r[b] += w_sorted[i2]
             cnt[b] += 1
             total += 1
+
+            # refresh band b's cached contribution (identifiable only with points
+            # both in and out of the window, and the right sign)
+            if contrib[b] >= 0.0:
+                sr2 -= contrib[b]
+                kk -= 1
+                contrib[b] = -1.0
+            if cnt[b] < band_n[b]:
+                denom = r[b] * (1.0 - r[b])
+                if denom > 0.0 and sign * s[b] >= 0.0:
+                    contrib[b] = band_w[b] * s[b] * s[b] / denom
+                    sr2 += contrib[b]
+                    kk += 1
+            if kk == 0:
+                sr2 = 0.0  # drop accumulated rounding once nothing contributes
+
             frac, phi_ing = _transit_fraction(phi_sorted, i1, i2, n)
             if frac >= q_max:
                 break
             if phi_sorted[(i2 + 1) % n] == phi_sorted[i2]:
                 continue  # egress edge would split identical phases
-            if total < min_points:
+            if frac < q_min or total < min_points:
                 continue
-            sr2 = 0.0
-            depths = np.full(n_bands, np.nan)
-            kk = 0
-            for bb in range(n_bands):
-                # identifiable only with points both in and out of the window
-                if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
-                    continue
-                denom = r[bb] * (1.0 - r[bb])
-                if denom <= 0.0:
-                    continue
-                sr2 += band_w[bb] * s[bb] * s[bb] / denom
-                depths[bb] = s[bb] / denom
-                kk += 1
             if kk == 0:
                 continue
             if sr2 > best_sr:
                 best_sr = sr2
-                best_depths = depths
                 best_k = kk
                 best_dur = frac * period
                 phi_mid = (phi_ing + 0.5 * frac) % 1.0
                 best_t0 = phi_mid * period
+                best_depths = np.full(n_bands, np.nan)
+                for bb in range(n_bands):
+                    if contrib[bb] >= 0.0:
+                        best_depths[bb] = s[bb] / (r[bb] * (1.0 - r[bb]))
     return best_sr, best_t0, best_dur, best_depths, best_k
 
 
 def multiband_sparse_bls_reference(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
+    q_min: float = 0.01,
     q_max: float = 0.15,
     min_points: int = 3,
     rescale_errors: bool = False,
+    sign: str = "both",
 ) -> BLSResult:
     """Multiband Sparse BLS (pure-Python reference).
 
@@ -717,13 +779,19 @@ def multiband_sparse_bls_reference(
     bands:
         Mapping ``label -> (t, y, dy)``. Each band keeps its own baseline and
         depth; all bands share the trial period, epoch and duration.
-    frequencies, q_max, min_points:
+    frequencies, q_min, q_max, min_points:
         As in :func:`sparse_bls_reference`.
     rescale_errors:
         Rescale each band's ``dy`` so its flat-model chi^2/dof is 1 (see
         :class:`BLSResult.band_chi2_red`).
+    sign:
+        ``"both"`` (default), ``"positive"`` or ``"negative"``; each band is judged
+        separately (a band whose in-window flux sum has the wrong sign adds nothing).
     """
-    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    sg = _check_sign(sign, "multiband_sparse_bls")
+    freqs, min_points, _ = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min
+    )
     bands, chi2_red = _prepare_bands(bands, rescale_errors)
     t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
     _check_phase_range(t_all, freqs)
@@ -751,10 +819,12 @@ def multiband_sparse_bls_reference(
             band_all[order],
             n_bands,
             period,
+            q_min,
             q_max,
             min_points,
             band_w,
             band_n,
+            sg,
         )
         power[idx] = sr
         k_used[idx] = k
@@ -790,6 +860,7 @@ def _meebls_period(
     min_points: int,
     band_w: Array,
     band_n: npt.NDArray[np.int64],
+    sign: float = 0.0,
 ) -> tuple[float, float, float, Array, int]:
     """Best combined ``(SR, t0, duration, depths[n_bands], k)`` for one period.
 
@@ -839,7 +910,7 @@ def _meebls_period(
                 if cnt[bb] < 1 or cnt[bb] >= band_n[bb]:
                     continue
                 denom = r[bb] * (1.0 - r[bb])
-                if denom <= 0.0:
+                if denom <= 0.0 or sign * s[bb] < 0.0:
                     continue
                 sr2 += band_w[bb] * s[bb] * s[bb] / denom
                 depths[bb] = s[bb] / denom
@@ -864,6 +935,7 @@ def multiband_eebls_reference(
     q_max: float = 0.10,
     min_points: int = 3,
     rescale_errors: bool = False,
+    sign: str = "both",
 ) -> BLSResult:
     """Binned multiband BLS (pure-Python reference).
 
@@ -893,14 +965,17 @@ def multiband_eebls_reference(
     rescale_errors :
         Rescale each band's ``dy`` so its flat-model chi^2/dof is 1 (see
         :class:`BLSResult.band_chi2_red`).
+        sign :
+        ``"both"`` (default), ``"positive"`` or ``"negative"``: only windows whose
+        signed weighted flux sum has that sign contribute (see :func:`eebls`).
     """
+    sg = _check_sign(sign, "multiband_eebls")
     freqs, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
     if nbins is None:
         nbins = auto_nbins(q_min)
-    kmi = max(1, int(q_min * nbins))
-    kma = min(nbins, int(q_max * nbins) + 1)
+    kmi, kma = width_bounds(nbins, q_min, q_max)
 
     bands, chi2_red = _prepare_bands(bands, rescale_errors)
     t_all, wx_all, w_all, band_all, labels, band_w, chi2_flat = _merge_band_arrays(bands)
@@ -916,7 +991,7 @@ def multiband_eebls_reference(
         period = 1.0 / f
         sr, t0, dur, depths, k = _meebls_period(
             t_all, wx_all, w_all, band_all, n_bands, period, nbins, kmi, kma,
-            min_points, band_w, band_n,
+            min_points, band_w, band_n, sg,
         )
         power[idx] = sr
         k_used[idx] = k
@@ -948,6 +1023,7 @@ def eebls_reference(
     q_min: float = 0.01,
     q_max: float = 0.10,
     min_points: int = 3,
+    sign: str = "both",
 ) -> BLSResult:
     """Single-band binned BLS (pure-Python reference).
 
@@ -967,14 +1043,17 @@ def eebls_reference(
         Minimum and maximum transit duration as a fraction of the period.
     min_points:
         Minimum number of in-transit points required.
+        sign :
+        ``"both"`` (default), ``"positive"`` or ``"negative"``: only windows whose
+        signed weighted flux sum has that sign contribute (see :func:`eebls`).
     """
+    sg = _check_sign(sign, "eebls")
     freqs, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
     if nbins is None:
         nbins = auto_nbins(q_min)
-    kmi = max(1, int(q_min * nbins))
-    kma = min(nbins, int(q_max * nbins) + 1)
+    kmi, kma = width_bounds(nbins, q_min, q_max)
 
     t, y, dy = _validate_light_curve(t, y, dy)
     _check_phase_range(t, freqs)
@@ -1016,6 +1095,8 @@ def eebls_reference(
                 if cnt >= t.shape[0]:
                     continue  # no out-of-transit point: depth not identifiable
                 denom = r * (1.0 - r)
+                if sg * s < 0.0:
+                    continue  # wrong-signed window (sign = 0: keep both)
                 if denom <= 0.0:
                     continue
                 sr = s * s / denom

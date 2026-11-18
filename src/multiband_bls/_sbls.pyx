@@ -13,8 +13,9 @@ cnp.import_array()
 
 
 cdef void _single_period(const double* phi, const double* wx, const double* w,
-                         Py_ssize_t n, double period, double q_max,
-                         int min_points, double* out) noexcept nogil:
+                         Py_ssize_t n, double period, double q_min,
+                         double q_max, int min_points, double sign,
+                         double* out) noexcept nogil:
     """Fill ``out = [SR, t0, duration, depth]`` for one trial period.
 
     Arrays are sorted ascending in phase. The in-transit block is a contiguous
@@ -70,8 +71,10 @@ cdef void _single_period(const double* phi, const double* wx, const double* w,
                 break
             if p_i2p == p_i2:
                 continue  # egress edge would split identical phases
-            if cnt < min_points:
+            if frac < q_min or cnt < min_points:
                 continue
+            if sign * s < 0.0:
+                continue  # wrong-signed window (sign = 0: keep both)
             denom = r * (1.0 - r)
             if denom <= 0.0:
                 continue
@@ -91,7 +94,8 @@ cdef void _single_period(const double* phi, const double* wx, const double* w,
 
 
 def sbls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
-              double[::1] freqs, double q_max, int min_points):
+              double[::1] freqs, double q_min, double q_max, int min_points,
+              double sign=0.0):
     """Scan a frequency grid; return ``(power, best_freq, t0, dur, depth, sr)``.
 
     ``wx = w_hat * x_tilde`` and ``w_hat`` are the normalised-weight products
@@ -130,7 +134,7 @@ def sbls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
             w_s[i] = w_hat[j]
         with nogil:
             _single_period(&phi_s[0], &wx_s[0], &w_s[0], n, period,
-                           q_max, min_points, out)
+                           q_min, q_max, min_points, sign, out)
         pw[fi] = out[0]
         if out[0] > best_sr:
             best_sr = out[0]

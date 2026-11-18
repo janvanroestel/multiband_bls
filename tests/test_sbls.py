@@ -535,10 +535,10 @@ _BAD_PARAMS = [
     pytest.param({"min_points": np.nan}, False, id="min_points_nan"),
     pytest.param({"min_points": np.inf}, False, id="min_points_inf"),
     pytest.param({"min_points": True}, False, id="min_points_bool"),
-    pytest.param({"q_min": 0.0}, True, id="q_min_zero"),
-    pytest.param({"q_min": -0.01}, True, id="q_min_negative"),
-    pytest.param({"q_min": np.nan}, True, id="q_min_nan"),
-    pytest.param({"q_min": 0.2, "q_max": 0.1}, True, id="q_min_gt_q_max"),
+    pytest.param({"q_min": 0.0}, False, id="q_min_zero"),
+    pytest.param({"q_min": -0.01}, False, id="q_min_negative"),
+    pytest.param({"q_min": np.nan}, False, id="q_min_nan"),
+    pytest.param({"q_min": 0.2, "q_max": 0.1}, False, id="q_min_gt_q_max"),
     pytest.param({"nbins": 0}, True, id="nbins_zero"),
     pytest.param({"nbins": 50.9}, True, id="nbins_float"),
     pytest.param({"nbins": np.inf}, True, id="nbins_inf"),
@@ -1657,7 +1657,7 @@ def test_sign_invalid_raises(fn):
 @pytest.mark.skipif(not gpu_available(), reason="no GPU")
 @pytest.mark.parametrize("sgn", ["positive", "negative"])
 def test_sign_gpu_matches_cpu(sgn):
-    bands, truth, (t, y, dy), freqs = _signed_single()
+    bands, _, (t, y, dy), _ = _signed_single()
     f = np.linspace(0.3, 0.6, 300)
     np.testing.assert_allclose(eebls_gpu(t, y, dy, f, sign=sgn).power,
                                eebls(t, y, dy, f, sign=sgn).power, rtol=1e-9, atol=1e-12)
@@ -1679,3 +1679,139 @@ def test_sign_gpu_selects_and_validates():
         assert fn(*arg, sign="positive").best_power > 5 * fn(*arg, sign="negative").best_power
         with pytest.raises(ValueError, match="sign"):
             fn(*arg, sign="up")
+
+
+# --- regression tests for review fixes -------------------------------------------------------
+
+
+def test_coarse_to_fine_handles_duplicate_frequencies(lightcurve, freqs):
+    from multiband_bls.api import _coarse_to_fine
+
+    calls: list[int] = []
+
+    def evaluate(f: np.ndarray) -> np.ndarray:
+        calls.append(f.size)
+        return np.sin(f * 7.0) ** 2
+
+    f = np.concatenate([freqs, freqs[::-1], freqs[:10]])  # duplicated and unsorted
+    out = _coarse_to_fine(evaluate, f, coarse_factor=4, n_refine=2)
+    assert out.shape == f.shape
+    np.testing.assert_allclose(out[: freqs.size], out[freqs.size: 2 * freqs.size][::-1])
+    np.testing.assert_allclose(out[-10:], out[:10])
+
+
+def test_width_bounds_respect_q_range():
+    from multiband_bls.reference import width_bounds
+
+    assert width_bounds(100, 0.01, 0.10) == (1, 10)
+    assert width_bounds(100, 0.07, 0.07) == (7, 7)  # float noise: 0.07 * 100 > 7
+    assert width_bounds(500, 0.0125, 0.1) == (7, 50)  # ceil(6.25)
+    with pytest.raises(ValueError, match="no window width"):
+        width_bounds(50, 0.011, 0.019)
+
+
+def test_binned_durations_within_q_range(lightcurve, freqs):
+    bands, truth = lightcurve
+    t, y, dy = bands["r"]
+    q_max = 0.10
+    f = np.array([1.0 / truth.period])
+    for res in (eebls(t, y, dy, f, nbins=100, q_max=q_max),
+                multiband_eebls(bands, f, nbins=100, q_max=q_max),
+                eebls_reference(t, y, dy, f, nbins=100, q_max=q_max),
+                multiband_eebls_reference(bands, f, nbins=100, q_max=q_max)):
+        assert res.best_duration <= q_max * truth.period * (1 + 1e-9)
+
+
+def test_reference_accepts_sign(lightcurve, freqs):
+    bands, _ = lightcurve
+    t, y, dy = bands["r"]
+    f = freqs[::20]
+    for sgn in ("both", "positive", "negative"):
+        np.testing.assert_allclose(eebls_reference(t, y, dy, f, sign=sgn).power,
+                                   eebls(t, y, dy, f, sign=sgn).power, rtol=1e-9, atol=1e-12)
+        np.testing.assert_allclose(multiband_eebls_reference(bands, f, sign=sgn).power,
+                                   multiband_eebls(bands, f, sign=sgn).power,
+                                   rtol=1e-9, atol=1e-12)
+    with pytest.raises(ValueError, match="sign"):
+        eebls_reference(t, y, dy, f, sign="up")
+
+
+# --- sparse q_min / sign, incremental multiband update ------------------------------------------
+
+
+def test_sparse_q_min_bounds_duration(lightcurve, freqs):
+    bands, truth = lightcurve
+    t, y, dy = bands["r"]
+    f = np.array([1.0 / truth.period])
+    q_min, q_max = 0.04, 0.08
+    for fn, arg in ((sparse_bls, (t, y, dy, f)), (sparse_bls_reference, (t, y, dy, f)),
+                    (multiband_sparse_bls, (bands, f)),
+                    (multiband_sparse_bls_reference, (bands, f))):
+        res = fn(*arg, q_min=q_min, q_max=q_max)
+        assert q_min * truth.period <= res.best_duration < q_max * truth.period
+
+
+@pytest.mark.parametrize("sgn", ["both", "positive", "negative"])
+def test_sparse_sign_and_q_min_match_reference(lightcurve, freqs, sgn):
+    bands, _ = lightcurve
+    t, y, dy = bands["r"]
+    f = freqs[::10]
+    kw = {"q_min": 0.03, "q_max": 0.12, "sign": sgn}
+    rc, rr = sparse_bls(t, y, dy, f, **kw), sparse_bls_reference(t, y, dy, f, **kw)
+    np.testing.assert_allclose(rc.power, rr.power, rtol=1e-9, atol=1e-12)
+    mc, mr = multiband_sparse_bls(bands, f, **kw), multiband_sparse_bls_reference(bands, f, **kw)
+    np.testing.assert_allclose(mc.power, mr.power, rtol=1e-9, atol=1e-12)
+    np.testing.assert_array_equal(mc.n_bands_used, mr.n_bands_used)
+    np.testing.assert_allclose(mc.best_depth, mr.best_depth, rtol=1e-9, equal_nan=True)
+
+
+def test_sparse_sign_selects_and_validates():
+    bands, truth, (t, y, dy), _ = _signed_single()
+    f = np.array([1.0 / truth.period])
+    for fn, arg in ((sparse_bls, (t, y, dy, f)), (multiband_sparse_bls, (bands, f)),
+                    (sparse_bls_reference, (t, y, dy, f)),
+                    (multiband_sparse_bls_reference, (bands, f))):
+        assert fn(*arg, sign="positive").best_power > 5 * fn(*arg, sign="negative").best_power
+        with pytest.raises(ValueError, match="sign"):
+            fn(*arg, sign="up")
+
+
+def test_multiband_sparse_incremental_matches_bruteforce(lightcurve, freqs):
+    """The cached per-band update agrees with re-summing every band per window."""
+    bands, _ = lightcurve
+    f = freqs[::25]
+    res = multiband_sparse_bls(bands, f, q_max=0.12)
+    # brute force: best exhaustive window over the merged phase-sorted samples
+    from multiband_bls.reference import _merge_band_arrays, _prepare_bands
+
+    prepared, _ = _prepare_bands(bands, False)
+    t_all, wx, w, band, labels, band_w, chi2 = _merge_band_arrays(prepared)
+    band_n = np.bincount(band, minlength=len(labels))
+    best = np.zeros(f.size)
+    for k, fk in enumerate(f):
+        phi = (t_all * fk) % 1.0
+        o = np.argsort(phi, kind="stable")
+        ph, x, ww, bb = phi[o], wx[o], w[o], band[o]
+        n = ph.size
+        for i1 in range(n):
+            if ph[i1 - 1] == ph[i1]:
+                continue
+            s = np.zeros(len(labels))
+            r = np.zeros(len(labels))
+            c = np.zeros(len(labels), int)
+            for m in range(n - 1):
+                i2 = (i1 + m) % n
+                s[bb[i2]] += x[i2]
+                r[bb[i2]] += ww[i2]
+                c[bb[i2]] += 1
+                lo = 0.5 * (ph[i1 - 1] + ph[i1]) - (0.5 if i1 == 0 else 0.0)
+                hi = 0.5 * (ph[i2] + ph[(i2 + 1) % n]) + (0.5 if (i2 + 1) % n == 0 else 0.0)
+                frac = (hi - lo) % 1.0
+                if frac >= 0.12:
+                    break
+                if ph[(i2 + 1) % n] == ph[i2] or frac < 0.01 or m + 1 < 3:
+                    continue
+                ok = (c >= 1) & (c < band_n) & (r * (1 - r) > 0)
+                if ok.any():
+                    best[k] = max(best[k], np.sum(band_w[ok] * s[ok] ** 2 / (r[ok] * (1 - r[ok]))))
+    np.testing.assert_allclose(res.power, best / chi2, rtol=1e-9, atol=1e-12)

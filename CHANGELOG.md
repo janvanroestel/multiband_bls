@@ -20,9 +20,27 @@
   full grid recovered, at 2.0-3.8x the speed. `n_bands_used` is `None` for
   `multiband_eebls_gpu_fast` when the coarse search skips frequencies (grids shorter
   than `4 * coarse_factor` are evaluated in full and keep it).
+- `sparse_bls` and `multiband_sparse_bls` (and their reference versions) take `q_min`
+  (default 0.01) and `sign`, matching the binned entry points. The binned reference
+  searches (`eebls_reference`, `multiband_eebls_reference`) also take `sign`, so the
+  pure-Python fallback accepts every documented argument.
+
+### Changed
+
+- Sparse searches now exclude windows shorter than `q_min` (default 0.01 of the
+  period); previously there was no minimum duration. Pass a smaller `q_min` for the
+  old behaviour.
+- Binned searches enforce `q_min <= duration <= q_max` exactly: the window widths are
+  now `ceil(q_min * nbins)` to `floor(q_max * nbins)` (previously `floor(q_min * nbins)`
+  to `floor(q_max * nbins) + 1`, which could exceed `q_max`). A `ValueError` is raised
+  if no integer width fits. Results can differ slightly from earlier versions.
+- `multiband_sparse_bls` updates the combined statistic incrementally (O(1) per window
+  extension instead of O(bands)): about 1.6x faster with 6 bands, 2.7x with 12.
 
 ### Fixed
 
+- Coarse-to-fine search no longer recurses forever when the frequency grid contains
+  duplicates.
 - Fast entry points (`eebls_fast`, `multiband_eebls_fast`, `eebls_gpu_fast`,
   `multiband_eebls_gpu_fast`): `best_t0`, `best_duration` and `best_depth` are now
   refined on the same median-centred times the search folded, so the refined window

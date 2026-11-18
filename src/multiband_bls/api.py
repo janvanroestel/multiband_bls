@@ -35,6 +35,7 @@ from . import _eebls, _fast, _meebls, _msbls, _sbls  # type: ignore[attr-defined
 from .periodogram import BLSResult
 from .reference import (
     _check_phase_range,
+    _check_sign,
     _merge_band_arrays,
     _prepare_bands,
     _validate_light_curve,
@@ -42,20 +43,12 @@ from .reference import (
     auto_nbins,
     preprocess,
     variance_explained,
+    width_bounds,
 )
 
 logger = logging.getLogger(__name__)
 
 Array = npt.NDArray[np.float64]
-
-
-_SIGNS = {"both": 0.0, "positive": 1.0, "negative": -1.0}
-
-def _check_sign(sign: str, name: str) -> float:
-    """Map ``sign`` ('both' | 'positive' | 'negative') to the kernels' -1/0/+1."""
-    if sign not in _SIGNS:
-        raise ValueError(f"{name}: sign must be one of {sorted(_SIGNS)}, got {sign!r}.")
-    return _SIGNS[sign]
 
 
 def _preprocess_single(
@@ -105,8 +98,10 @@ def sparse_bls(
     y: Array,
     dy: Array,
     frequencies: Array,
+    q_min: float = 0.01,
     q_max: float = 0.15,
     min_points: int = 3,
+    sign: str = "both",
 ) -> BLSResult:
     """Single-band Sparse BLS (compiled). See :func:`reference.sparse_bls_reference`.
 
@@ -123,13 +118,18 @@ def sparse_bls(
         1-sigma uncertainties, 1-D float array, same length as ``t``.
     frequencies :
         Trial frequencies (1/day).
-    q_max :
-        Maximum transit duration as a fraction of the period.
+    q_min, q_max :
+        Minimum and maximum transit duration as a fraction of the period. The
+        duration of a window is measured between the midpoints of the gaps to
+        its neighbouring points. Note the default ``q_max`` (0.15) differs from
+        the binned variants' (0.10).
     min_points :
-        Minimum number of in-transit points required. Unlike the binned
-        variants there is no minimum duration (``q_min``), so this is the only
-        guard against ultra-narrow boxes. Note the default ``q_max`` (0.15)
-        differs from the binned variants' (0.10).
+        Minimum number of in-transit points required.
+    sign :
+        Signal sign to search for: ``"both"`` (default), ``"positive"`` or
+        ``"negative"``. Positive keeps windows whose weighted mean of ``y`` lies above
+        the out-of-window baseline (magnitudes: dimming/eclipse; fluxes: brightening),
+        negative the opposite.
 
     Raises
     ------
@@ -138,14 +138,17 @@ def sparse_bls(
         non-positive frequencies, ``q_max`` outside ``(0, 1)``, or a
         non-integer / ``< 1`` ``min_points``.
     """
-    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    sg = _check_sign(sign, "sparse_bls")
+    freqs, min_points, _ = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min
+    )
     t, y, dy = _validate_light_curve(t, y, dy)
     _check_phase_range(t, freqs)
     t = np.ascontiguousarray(t, dtype=np.float64)
     wx, w_hat, yy = _preprocess_single(y, dy)
 
     power, best_freq, t0, dur, depth, sr = _sbls.sbls_grid(
-        t, wx, w_hat, freqs, float(q_max), min_points
+        t, wx, w_hat, freqs, float(q_min), float(q_max), min_points, sg
     )
     return BLSResult(
         frequency=freqs,
@@ -240,9 +243,11 @@ def eebls(
 def multiband_sparse_bls(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
+    q_min: float = 0.01,
     q_max: float = 0.15,
     min_points: int = 3,
     rescale_errors: bool = False,
+    sign: str = "both",
 ) -> BLSResult:
     """Multiband Sparse BLS (compiled). See :func:`reference.multiband_sparse_bls_reference`.
 
@@ -258,15 +263,19 @@ def multiband_sparse_bls(
         depth; all bands share the trial period, epoch, and duration.
     frequencies :
         Trial frequencies (1/day).
-    q_max :
-        Maximum transit duration as a fraction of the period.
+    q_min, q_max :
+        Minimum and maximum transit duration as a fraction of the period (see
+        :func:`sparse_bls`).
     min_points :
-        Minimum number of in-transit points required across all bands. As in
-        :func:`sparse_bls`, there is no minimum duration (``q_min``).
+        Minimum number of in-transit points required across all bands.
     rescale_errors :
         If True, multiply each band's ``dy`` by ``sqrt(band_chi2_red)`` so its
         flat-model chi^2/dof is 1 before weighting (bands with a single point or
         zero scatter are left unchanged, with a warning). Off by default.
+    sign :
+        ``"both"`` (default), ``"positive"`` or ``"negative"``; each band is
+        judged separately (a band whose in-window flux sum has the wrong sign
+        adds nothing).
 
     Returns
     -------
@@ -274,7 +283,10 @@ def multiband_sparse_bls(
         Includes ``n_bands_used`` (contributing bands per frequency) and
         ``band_chi2_red`` (per-band reduced chi^2 of the input ``dy``).
     """
-    freqs, min_points, _ = _validate_search_params(frequencies, q_max, min_points)
+    sg = _check_sign(sign, "multiband_sparse_bls")
+    freqs, min_points, _ = _validate_search_params(
+        frequencies, q_max, min_points, q_min=q_min
+    )
     bands, chi2_red = _prepare_bands(bands, rescale_errors)
     t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
     _check_phase_range(t_all, freqs)
@@ -282,7 +294,7 @@ def multiband_sparse_bls(
 
     power, best_freq, t0, dur, depths, sr, k_used = _msbls.msbls_grid(
         t_all, wx_all, w_all, band_all, len(labels), freqs,
-        float(q_max), min_points, band_w,
+        float(q_min), float(q_max), min_points, band_w, sg,
     )
     return BLSResult(
         frequency=freqs,
@@ -404,8 +416,7 @@ def _log_widths(kmi: int, kma: int, dlogq: float = 0.3) -> np.ndarray:
 
 
 def _grid_params(nbins: int, q_min: float, q_max: float) -> tuple[int, int]:
-    kmi = max(1, int(q_min * nbins))
-    kma = min(nbins, int(q_max * nbins) + 1)
+    kmi, kma = width_bounds(nbins, q_min, q_max)
     # Load-bearing invariant: every kernel wraps the circular window with a single
     # subtraction (`if (jj >= nb) jj -= nb`), which is only correct when the widest
     # window (kma) does not exceed nbins. Violating this would silently read/write
@@ -535,10 +546,10 @@ def _coarse_to_fine(
     if not _coarse_active(nf, coarse_factor):
         return evaluate(freqs)
     if np.any(np.diff(freqs) <= 0.0):  # interpolation and the refine bands need ascending order
-        order = np.argsort(freqs, kind="stable")
-        out = np.empty(nf)
-        out[order] = _coarse_to_fine(evaluate, freqs[order], coarse_factor, n_refine)
-        return out
+        # np.unique sorts and drops duplicates (which would otherwise recurse forever,
+        # since a sorted array with repeats still fails the strict-ascent test).
+        uniq, inverse = np.unique(freqs, return_inverse=True)
+        return _coarse_to_fine(evaluate, uniq, coarse_factor, n_refine)[inverse.ravel()]
     idx_c: npt.NDArray[np.intp] = np.arange(0, nf, coarse_factor, dtype=np.intp)
     if idx_c[-1] != nf - 1:
         idx_c = np.append(idx_c, np.intp(nf - 1))
@@ -728,7 +739,8 @@ def multiband_eebls_fast(
     # bands were already rescaled above: refine on them without rescaling again
     bands_c = _shift_bands(bands, t_offset)
     return _result(power, chi2_flat, freqs,
-                   _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]), nbins=nbins,
-                                                         q_min=q_min, q_max=q_max,
-                                                         min_points=min_points, sign=sign), t_offset),
+                   _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]),
+                                                         nbins=nbins, q_min=q_min,
+                                                         q_max=q_max, min_points=min_points,
+                                                         sign=sign), t_offset),
                    bands=labels, band_chi2_red=chi2_red)

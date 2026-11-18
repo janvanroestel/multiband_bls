@@ -16,7 +16,7 @@ multiband factor. Mirrors
 
 import numpy as np
 cimport numpy as cnp
-from libc.math cimport floor, NAN
+from libc.math cimport ceil, floor, NAN
 
 cnp.import_array()
 
@@ -133,10 +133,10 @@ def meebls_grid(double[::1] t, double[::1] wx, double[::1] w_hat,
     cdef Py_ssize_t n = t.shape[0]
     cdef Py_ssize_t fi
 
-    cdef int kmi = <int>(qmin * nb)
+    cdef int kmi = <int>ceil(qmin * nb - 1e-9)
     if kmi < 1:
         kmi = 1
-    cdef int kma = <int>(qmax * nb) + 1
+    cdef int kma = <int>floor(qmax * nb + 1e-9)
     if kma > nb:
         kma = nb
 

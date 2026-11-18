@@ -33,12 +33,12 @@ import numpy.typing as npt
 from .api import (
     _check_coarse,
     _check_dlogq,
+    _check_sign,
     _coarse_active,
     _coarse_to_fine,
     _flux_scale,
     _grid_params,
     _log_widths,
-    _check_sign,
     _merge_bands,
     _preprocess_single,
     _refine_at,
@@ -1154,9 +1154,10 @@ def multiband_eebls_gpu_fast(
     # refined parameters share one objective.
     bands_c = _shift_bands(bands, t_offset)
     return _result(power, chi2_flat, freqs_np,
-                   _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]), nbins=nbins,
-                                                         q_min=q_min, q_max=q_max,
-                                                         min_points=min_points, sign=sign), t_offset),
+                   _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]),
+                                                         nbins=nbins, q_min=q_min,
+                                                         q_max=q_max, min_points=min_points,
+                                                         sign=sign), t_offset),
                    bands=labels, band_chi2_red=chi2_red, n_bands_used=n_bands_used)
 
 
