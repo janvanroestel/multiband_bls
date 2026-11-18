@@ -224,7 +224,7 @@ def test_rho_sun_constant():
 
 def test_q_floor_clamps_lower_bound_and_coarsens_grid():
     f = np.array([0.01, 0.1, 1.0, 10.0])
-    free_lo, free_hi = density_duration_bounds(f, RHO)
+    free_lo, _ = density_duration_bounds(f, RHO)
     lo, hi = density_duration_bounds(f, RHO, q_floor=0.01)
     assert np.all(lo >= 0.01) and np.all(hi >= lo)
     assert lo[0] == pytest.approx(0.01) and free_lo[0] < 0.01  # floor binds at long period
