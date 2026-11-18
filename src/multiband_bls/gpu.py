@@ -83,6 +83,11 @@ _MAX_FAST_FLOAT32: float = 1e30
 # max|t_centred| * max(f) (measured: <= 4e-8 up to 1e6 cycles, 7e-7 at 1e8, 7e-5 at
 # 1e10); beyond 1e8 cycles it is no longer small against a 1/nbins bin.
 _MAX_FAST_CYCLES: float = 1e8
+# Measured phase error of the float-float fold (RTX 3050 Ti, 2e5 random times vs an
+# 80-bit reference, independent of f at fixed cycles): 3-8e-8 up to 1e7 cycles, 4-8e-7 at
+# 1e8, 6-7e-6 at 1e9, 5-6e-5 at 1e10, i.e. about max(1e-7, 1e-14 * cycles). Even at the
+# 1e8-cycle limit that is far below one bin for any nbins the kernels' shared memory
+# allows, so no precision warning is issued.
 
 
 def _check_int32_sizes(n: int, nf: int, name: str) -> None:
