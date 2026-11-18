@@ -117,11 +117,12 @@ class DensityPrior:
                         "for 5 bins per transit; using %d. Pass nbins to override.",
                         q_min, wanted, _MAX_AUTO_NBINS)
                     capped_logged = True
+            widened = False
             if nb is not None:
                 kmi = max(1, math.ceil(q_min * nb - 1e-9))  # as reference.width_bounds
                 if kmi > math.floor(q_max * nb + 1e-9):
-                    q_max = min(kmi / nb, 0.999)
-            out.append((order[s:e], SegmentSpec(q_min, q_max, nb)))
+                    q_max, widened = min(kmi / nb, 0.999), True
+            out.append((order[s:e], SegmentSpec(q_min, q_max, nb, widened)))
         return out
 
 

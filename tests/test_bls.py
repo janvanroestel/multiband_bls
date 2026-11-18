@@ -248,3 +248,105 @@ def test_registry_lists_all_ten_implementations():
     assert ("binned", "gpu", True) in keys
     with pytest.raises(ValueError, match="no implementation"):
         get_implementation("sparse", "gpu", False)
+
+
+# --------------------------------------------------------------------------- #
+# inspection regressions                                                       #
+# --------------------------------------------------------------------------- #
+def test_snapshot_exposes_nothing_mutable():
+    snap = bls_prepare(S, method="binned")
+    base = bls(snap, F)
+    with pytest.raises(ValueError, match="read-only"):
+        snap.times[:] += 0.1
+    # a result's diagnostics must not alias the snapshot's state
+    msnap = bls_prepare(B, method="binned")
+    r1 = bls(msnap, F)
+    r1.band_chi2_red[:] = -1.0
+    r2 = bls(msnap, F)
+    assert np.all(r2.band_chi2_red != -1.0)
+    _same(base, bls(snap, F))
+    # the snapshot's own times do not alias what the search used
+    assert not np.shares_memory(snap.times, snap._state.t_raw)
+
+
+def test_missing_compiled_cores_fall_back_to_reference():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, warnings\n"
+        "for m in ('_sbls', '_msbls', '_eebls', '_meebls', '_fast'):\n"
+        "    sys.modules['multiband_bls.' + m] = None\n"
+        "with warnings.catch_warnings(record=True) as w:\n"
+        "    warnings.simplefilter('always')\n"
+        "    import multiband_bls as m\n"
+        "assert m.sparse_bls is m.sparse_bls_reference and m.eebls is m.eebls_reference\n"
+        "assert any('Cython' in str(x.message) for x in w)\n"
+        "for fn in (m.bls, m.eebls_fast, m.eebls_gpu):\n"
+        "    try:\n"
+        "        fn(None)\n"
+        "    except ImportError:\n"
+        "        pass\n"
+        "    else:\n"
+        "        raise SystemExit('no ImportError from ' + fn.__name__)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+
+
+def test_evaluated_mask_marks_interpolated_frequencies():
+    f = np.linspace(_freqs()[0], _freqs()[-1], 400)
+    full = bls(B, f, method="fast", backend="cpu")
+    assert full.evaluated is None  # every frequency evaluated
+    coarse = bls(B, f, method="fast", backend="cpu", coarse_factor=4, n_refine=3)
+    assert coarse.evaluated is not None and coarse.evaluated.shape == f.shape
+    assert 0 < coarse.evaluated.sum() < f.size
+    assert coarse.evaluated[int(np.argmax(coarse.power))]  # the peak is a real evaluation
+    assert coarse.options.coarse_factor == 4 and coarse.options.n_refine == 3
+    # duplicates / descending order map the mask back to the caller's order
+    shuffled = np.concatenate([f[::-1], f[:50]])
+    rev = bls(B, shuffled, method="fast", backend="cpu", coarse_factor=4, n_refine=3)
+    assert rev.evaluated.shape == shuffled.shape
+    # a segmented (density) search assembles the mask in caller order too
+    cfg = SearchConfig(density_prior=DensityPrior((0.2, 5.0)))
+    seg = bls(B, np.geomspace(0.5, 20.0, 800), method="fast", backend="cpu", config=cfg,
+              coarse_factor=3)
+    assert seg.evaluated is not None and seg.evaluated.shape == (800,)
+
+
+def test_options_and_fallback_are_recorded():
+    res = bls(B, F, method="fast", backend="cpu", rescale_errors=True,
+              config=SearchConfig(sign="negative", min_points=7), dlogq=0.2)
+    o = res.options
+    assert (o.sign, o.min_points, o.dlogq, o.rescale_errors) == ("negative", 7, 0.2, True)
+    assert o.requested_backend == "cpu" and o.fallback is None
+    sparse = bls(S, F, method="sparse", backend="cpu").options
+    assert sparse.dlogq is None and sparse.coarse_factor == 1
+    auto = bls(B, F[:20], method="binned", backend="auto", config=SearchConfig(nbins=9000))
+    assert auto.backend == "cpu" and auto.options.requested_backend == "auto"
+    if mb.gpu_available():  # the CPU result must say why it is not on the GPU
+        assert auto.options.fallback is not None and "GPU limit" in auto.options.fallback
+    else:
+        assert auto.options.fallback is None
+
+
+def test_q_bounds_and_widening_metadata():
+    cfg = SearchConfig(density_prior=DensityPrior((1.0, 1.0), (1.0, 1.0)))
+    res = bls(S, np.array([1.0, 2.0, 5.0]), method="binned", backend="cpu", config=cfg)
+    assert any(seg.widened for seg in res.segments)
+    lo, hi = res.q_bounds(res.frequency)
+    assert np.all(np.isfinite(lo)) and np.all(hi >= lo)
+    assert np.isnan(res.q_bounds(1e-6)[0]).all()  # outside every segment
+    fixed = bls(S, F, method="binned", backend="cpu", config=SearchConfig(q_min=0.02))
+    assert not fixed.segments[0].widened
+    np.testing.assert_array_equal(fixed.q_bounds(F)[0], 0.02)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, "2"])
+def test_bls_validates_n_threads_for_fast(bad):
+    with pytest.raises(ValueError, match="n_threads"):
+        bls(S, F, method="fast", backend="cpu", n_threads=bad)
+    # the same validation applies whatever backend "auto" ends up choosing
+    with pytest.raises(ValueError, match="n_threads"):
+        bls(S, F, method="fast", backend="auto", n_threads=bad)
+    bls(S, F, method="binned", backend="cpu", n_threads=bad)  # unused by other methods

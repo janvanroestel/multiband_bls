@@ -148,13 +148,14 @@ def _coarse_active(n_freqs: int, coarse_factor: int) -> bool:
     return coarse_factor > 1 and n_freqs >= 4 * coarse_factor
 
 
-def _coarse_to_fine(
+def _coarse_eval(
     evaluate: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]],
     freqs: npt.NDArray[np.float64],
     coarse_factor: int,
     n_refine: int,
-) -> npt.NDArray[np.float64]:
-    """Raw power over ``freqs`` from a coarse pass plus local refinement.
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
+    """Raw power over ``freqs`` from a coarse pass plus local refinement, and which
+    frequencies were actually evaluated (the rest hold interpolated values).
 
     ``evaluate(f)`` returns the raw (unnormalised) power at the frequencies ``f``.
     With ``coarse_factor == 1`` this is just ``evaluate(freqs)``. Otherwise every
@@ -167,12 +168,13 @@ def _coarse_to_fine(
     """
     nf = freqs.size
     if not _coarse_active(nf, coarse_factor):
-        return evaluate(freqs)
+        return evaluate(freqs), np.ones(nf, dtype=bool)
     if np.any(np.diff(freqs) <= 0.0):  # interpolation and the refine bands need ascending order
         # np.unique sorts and drops duplicates (which would otherwise recurse forever,
         # since a sorted array with repeats still fails the strict-ascent test).
         uniq, inverse = np.unique(freqs, return_inverse=True)
-        return _coarse_to_fine(evaluate, uniq, coarse_factor, n_refine)[inverse.ravel()]
+        p, m = _coarse_eval(evaluate, uniq, coarse_factor, n_refine)
+        return p[inverse.ravel()], m[inverse.ravel()]
     idx_c: npt.NDArray[np.intp] = np.arange(0, nf, coarse_factor, dtype=np.intp)
     if idx_c[-1] != nf - 1:
         idx_c = np.append(idx_c, np.intp(nf - 1))
@@ -192,4 +194,18 @@ def _coarse_to_fine(
     if todo.size:
         power[todo] = evaluate(freqs[todo])
     power[idx_c] = pc
-    return power
+    evaluated = np.zeros(nf, dtype=bool)
+    evaluated[idx_c] = True
+    evaluated[todo] = True
+    return power, evaluated
+
+
+def _coarse_to_fine(
+    evaluate: Callable[[npt.NDArray[np.float64]], npt.NDArray[np.float64]],
+    freqs: npt.NDArray[np.float64],
+    coarse_factor: int,
+    n_refine: int,
+) -> npt.NDArray[np.float64]:
+    """Raw power over ``freqs`` from a coarse pass plus local refinement (see
+    :func:`_coarse_eval`, which also reports which frequencies were evaluated)."""
+    return _coarse_eval(evaluate, freqs, coarse_factor, n_refine)[0]

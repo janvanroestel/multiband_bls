@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from . import _eebls, _fast, _meebls, _msbls, _sbls  # type: ignore[attr-defined]  # noqa: F401
 from ._common import _check_coarse, _check_dlogq, _check_n_threads
 from ._prep import auto_nbins
 from ._validate import _check_sign, _validate_search_params

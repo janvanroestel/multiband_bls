@@ -12,14 +12,14 @@ from typing import Any, Literal
 import numpy as np
 import numpy.typing as npt
 
-from ._common import _check_coarse, _check_dlogq
+from ._common import _check_coarse, _check_dlogq, _check_n_threads
 from ._prep import auto_nbins
 from ._validate import _check_sign, _validate_search_params
 from .backends import get_implementation
 from .config import Backend, Method, SearchConfig
 from .engine import CapabilityError, RunOptions, SegmentSpec, execute
 from .grids import build_frequency_grid
-from .result import BLSResult
+from .result import BLSResult, SearchOptions
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,8 @@ class PreparedData:
     backend: str
     multiband: bool
     rescale_errors: bool
-    times: Array
-    prep: Any
+    times: Array  # a read-only copy
+    _state: Any  # backend state (private: arrays the cores read; never handed out)
 
 
 def bls_prepare(
@@ -72,8 +72,9 @@ def bls_prepare(
         owned = tuple(np.array(a, dtype=np.float64) for a in data)  # type: ignore[union-attr]
     impl = get_implementation(method, backend, multiband)
     prep = impl.prepare(owned, rescale_errors)  # type: ignore[attr-defined]
-    return PreparedData(method, backend, multiband, rescale_errors,
-                        _all_times(owned, multiband), prep)
+    times = _all_times(owned, multiband).copy()  # not the backend's own array
+    times.flags.writeable = False
+    return PreparedData(method, backend, multiband, rescale_errors, times, prep)
 
 
 def _is_multiband(data: Any) -> bool:
@@ -195,12 +196,13 @@ def bls(
         freqs_in, prior.q_cap if prior is not None else q_max, cfg.min_points,
         q_min=None if prior is not None else q_min, nbins=cfg.nbins)
     binned = method != "sparse"
-    dlogq_v, (coarse_v, n_refine_v) = 0.3, (1, 20)
+    dlogq_v, (coarse_v, n_refine_v), threads_v = 0.3, (1, 20), 1
     if method == "fast":
         dlogq_v = _check_dlogq(dlogq, "bls")
         coarse_v, n_refine_v = _check_coarse(coarse_factor, n_refine, "bls")
+        threads_v = _check_n_threads(n_threads, "bls")  # also checked when the GPU ignores it
     opts = RunOptions(min_points=min_points, sign=sg, sign_name=cfg.sign, dlogq=dlogq_v,
-                      n_threads=int(n_threads), coarse_factor=coarse_v, n_refine=n_refine_v,
+                      n_threads=threads_v, coarse_factor=coarse_v, n_refine=n_refine_v,
                       compute_n_bands_used=compute_n_bands_used)
 
     if prior is not None:
@@ -209,21 +211,25 @@ def bls(
         nb = (auto_nbins(q_min) if nbins is None else nbins) if binned else None
         segments = [(slice(None), SegmentSpec(q_min, q_max, nb))]
 
-    def run(which: str) -> BLSResult:
+    def run(which: str, fallback: str | None = None) -> BLSResult:
         impl = get_implementation(method, which, multiband)
-        prep = snap.prep if snap is not None else impl.prepare(  # type: ignore[attr-defined]
+        prep = snap._state if snap is not None else impl.prepare(  # type: ignore[attr-defined]
             data, rescale_errors)
-        return execute(impl, prep, freqs, segments, opts)
+        info = SearchOptions(rescale_errors=rescale_errors, requested_backend=backend,
+                             fallback=fallback)
+        return execute(impl, prep, freqs, segments, opts, info)
 
     if backend != "auto":
         return run(backend)
+    reason: str | None = None
     if method != "sparse" and _gpu_ready():
         try:
             return run("gpu")
         except CapabilityError as exc:
+            reason = f"GPU limit: {exc}"
             logger.info("bls(backend='auto'): GPU cannot run this search (%s); using the CPU.",
                         exc)
-    return run("cpu")
+    return run("cpu", reason)
 
 
 def _gpu_ready() -> bool:

@@ -21,7 +21,7 @@ from .. import gpu as _k
 from .._common import (
     _check_phase_range,
     _coarse_active,
-    _coarse_to_fine,
+    _coarse_eval,
     _flux_scale,
     _grid_params,
     _log_widths,
@@ -259,7 +259,8 @@ class FastGpuSingle(_GpuBase):
                 shared_mem=shared)
             return cp.asnumpy(power_d)
 
-        return RunOutput(_coarse_to_fine(evaluate, freqs, opts.coarse_factor, opts.n_refine))
+        power, evaluated = _coarse_eval(evaluate, freqs, opts.coarse_factor, opts.n_refine)
+        return RunOutput(power, evaluated=evaluated)
 
     def refine(self, prep: Any, freq: float, spec: SegmentSpec, opts: RunOptions) -> BestFit:
         h = prep.host
@@ -359,9 +360,10 @@ class FastGpuMulti(_GpuBase):
                 k_out.append(cp.asnumpy(k_d))
             return cp.asnumpy(power_d)
 
-        power = _coarse_to_fine(evaluate, freqs, opts.coarse_factor, opts.n_refine)
+        power, evaluated = _coarse_eval(evaluate, freqs, opts.coarse_factor, opts.n_refine)
         # (a full evaluation, i.e. no coarse search, is one call over the whole grid)
-        return RunOutput(power, None, k_out[0].astype(np.int64) if with_k else None)
+        return RunOutput(power, None, k_out[0].astype(np.int64) if with_k else None,
+                         evaluated)
 
     def refine(self, prep: Any, freq: float, spec: SegmentSpec, opts: RunOptions) -> BestFit:
         h = prep.host

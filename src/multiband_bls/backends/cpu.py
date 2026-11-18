@@ -12,7 +12,7 @@ import numpy.typing as npt
 from .. import _eebls, _fast, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
 from .._common import (
     _check_phase_range,
-    _coarse_to_fine,
+    _coarse_eval,
     _grid_params,
     _log_widths,
     _merge_bands,
@@ -130,9 +130,9 @@ class FastSingle(_CpuBase):
             return _fast.eebls_fast_grid(prep.t, prep.wx, prep.w_hat, np.ascontiguousarray(f),
                                          spec.nbins, widths, mp, opts.sign)
 
-        power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, opts.n_threads), freqs,
-                                opts.coarse_factor, opts.n_refine)
-        return RunOutput(power)
+        power, evaluated = _coarse_eval(lambda f: _threaded_grid(kernel, f, opts.n_threads),
+                                        freqs, opts.coarse_factor, opts.n_refine)
+        return RunOutput(power, evaluated=evaluated)
 
     def refine(self, prep: Any, freq: float, spec: SegmentSpec, opts: RunOptions) -> BestFit:
         _, _, t0, dur, depth, sr = _eebls.eebls_grid(
@@ -191,9 +191,9 @@ class FastMulti(_CpuBase):
                                           np.ascontiguousarray(f), spec.nbins, widths, mp,
                                           prep.band_w, prep.band_n, opts.sign)
 
-        power = _coarse_to_fine(lambda f: _threaded_grid(kernel, f, opts.n_threads), freqs,
-                                opts.coarse_factor, opts.n_refine)
-        return RunOutput(power)
+        power, evaluated = _coarse_eval(lambda f: _threaded_grid(kernel, f, opts.n_threads),
+                                        freqs, opts.coarse_factor, opts.n_refine)
+        return RunOutput(power, evaluated=evaluated)
 
     def refine(self, prep: Any, freq: float, spec: SegmentSpec, opts: RunOptions) -> BestFit:
         _, _, t0, dur, depths, sr, _ = _meebls.meebls_grid(

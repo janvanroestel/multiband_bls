@@ -269,6 +269,9 @@ All entry points return an `BLSResult` dataclass:
 | `band_chi2_red` | `ndarray` or `None` | multiband only: per-band flat-model χ²/dof of the input `dy` |
 | `method`, `backend` | `str` or `None` | the search that produced the result (e.g. `"fast"`, `"cpu"`) |
 | `segments` | `tuple[SegmentRecord, ...]` or `None` | frequency range, `q_min`/`q_max` and `nbins` searched in each segment |
+| `options` | `SearchOptions` or `None` | resolved `sign`, `min_points`, `dlogq`, coarse settings, `rescale_errors`, requested backend and the reason for an automatic CPU fallback |
+| `evaluated` | `ndarray[bool]` or `None` | coarse-to-fine searches: which frequencies were evaluated (False = interpolated power); `None` = all |
+| `q_bounds(f)` | method | `(q_min, q_max)` searched at frequency `f`, from `segments` |
 | `has_solution` | `bool` (property) | `best_power > 0`; says nothing about significance. If False the `best_*` fields refer to the first trial frequency |
 
 ## GPU backend

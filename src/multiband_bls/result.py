@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["BLSResult", "SegmentRecord"]
+__all__ = ["BLSResult", "SearchOptions", "SegmentRecord"]
 
 from dataclasses import dataclass
 
@@ -16,9 +16,9 @@ Array = npt.NDArray[np.float64]
 class SegmentRecord:
     """One searched frequency segment: its range, size and duration/bin settings.
 
-    ``q_min``/``q_max`` are the duty-cycle limits the segment was *searched* with (for a
-    density search these may be widened slightly so that a whole number of bins fits).
-    ``nbins`` is ``None`` for the unbinned sparse search.
+    ``q_min``/``q_max`` are the duty-cycle limits the segment was *searched* with. For a
+    density search ``q_max`` may have been widened (``widened=True``) so that a whole
+    number of bins fits. ``nbins`` is ``None`` for the unbinned sparse search.
     """
 
     f_min: float
@@ -27,6 +27,21 @@ class SegmentRecord:
     q_min: float
     q_max: float
     nbins: int | None = None
+    widened: bool = False
+
+
+@dataclass(frozen=True)
+class SearchOptions:
+    """The resolved options a result was computed with (for reproducing the search)."""
+
+    sign: str = "both"
+    min_points: int = 3
+    dlogq: float | None = None  # "fast" method only
+    coarse_factor: int = 1
+    n_refine: int = 20
+    rescale_errors: bool = False
+    requested_backend: str | None = None  # what the caller asked for ("auto", "gpu", ...)
+    fallback: str | None = None  # why "auto" used the CPU instead of the GPU, if it did
 
 
 @dataclass(frozen=True)
@@ -80,6 +95,12 @@ class BLSResult:
     method, backend:
         Which search produced the result (e.g. ``"binned"`` / ``"cpu"``), or ``None`` for
         results built by hand.
+    options:
+        The resolved :class:`SearchOptions` (sign, ``min_points``, fast/coarse settings,
+        ``rescale_errors``, requested backend and any automatic CPU fallback).
+    evaluated:
+        Boolean array over :attr:`frequency`, or ``None`` when every frequency was
+        evaluated. For a coarse-to-fine search the False entries hold interpolated power.
     segments:
         One :class:`SegmentRecord` per searched frequency segment (a single record for a
         fixed-``q`` search), or ``None``. This is a compact record of the widths actually
@@ -100,6 +121,21 @@ class BLSResult:
     method: str | None = None
     backend: str | None = None
     segments: tuple[SegmentRecord, ...] | None = None
+    options: SearchOptions | None = None
+    evaluated: npt.NDArray[np.bool_] | None = None
+
+    def q_bounds(self, frequency: Array | float) -> tuple[Array, Array]:
+        """``(q_min, q_max)`` the search used at ``frequency`` (from :attr:`segments`).
+
+        Frequencies in no segment's range (or a result without segments) give NaN.
+        """
+        f = np.atleast_1d(np.asarray(frequency, dtype=np.float64))
+        lo = np.full(f.shape, np.nan)
+        hi = np.full(f.shape, np.nan)
+        for seg in self.segments or ():
+            inside = (f >= seg.f_min) & (f <= seg.f_max)
+            lo[inside], hi[inside] = seg.q_min, seg.q_max
+        return lo, hi
 
     @property
     def has_solution(self) -> bool:

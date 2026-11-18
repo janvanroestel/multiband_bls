@@ -22,7 +22,9 @@
   0.1-10 d to 30 s-1 d (`density_duration_bounds` and `density_frequency_grid` expose the
   pieces). `power` is maximised over a different width range in each segment, so its noise
   floor drifts slowly with frequency.
-- `BLSResult.method`, `.backend`, `.segments` (the widths and bins actually searched) and
+- `BLSResult.method`, `.backend`, `.segments` (the widths and bins actually searched, with
+  a `widened` flag), `.options` (resolved search options and any automatic CPU fallback),
+  `.evaluated` (coarse searches: which frequencies are real evaluations), `.q_bounds()` and
   `.has_solution` (`best_power > 0`).
 - A segment search preprocesses and merges the data once and does one exact best-fit refit
   at the global peak; previously each refinement re-validated and re-preprocessed.

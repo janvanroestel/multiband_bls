@@ -31,7 +31,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ._prep import variance_explained
-from .result import BLSResult, SegmentRecord
+from .result import BLSResult, SearchOptions, SegmentRecord
 
 Array = npt.NDArray[np.float64]
 
@@ -51,6 +51,7 @@ class SegmentSpec:
     q_min: float
     q_max: float
     nbins: int | None = None
+    widened: bool = False  # q_max was raised so that a whole number of bins fits
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class RunOutput:
     power: Array  # raw, unnormalised power at the segment's frequencies
     best: BestFit | None = None  # exact cores report their best window directly
     n_bands_used: npt.NDArray[np.int64] | None = None
+    evaluated: npt.NDArray[np.bool_] | None = None  # coarse search: False = interpolated
 
 
 class Prepared:
@@ -129,12 +131,15 @@ def execute(
     freqs: Array,
     segments: Sequence[Segment],
     opts: RunOptions,
+    info: SearchOptions | None = None,
 ) -> BLSResult:
     """Run ``impl`` over ``segments`` of ``freqs`` and assemble one :class:`BLSResult`.
 
     ``power`` follows the caller's frequency order. The best window is the highest-power
     one over all segments; if nothing passed the cuts anywhere, ``best_*`` refer to the
-    caller's first frequency (the :class:`BLSResult` contract).
+    caller's first frequency (the :class:`BLSResult` contract). ``info`` carries the
+    caller-level options (requested backend, fallback reason, ``rescale_errors``) into
+    :attr:`BLSResult.options`.
     """
     impl.check_frequencies(prep, freqs, opts)
     nf = freqs.shape[0]
@@ -165,9 +170,22 @@ def execute(
         SegmentRecord(
             f_min=float(np.min(freqs[sel])), f_max=float(np.max(freqs[sel])),
             n_freqs=int(np.size(freqs[sel])),
-            q_min=spec.q_min, q_max=spec.q_max, nbins=spec.nbins)
+            q_min=spec.q_min, q_max=spec.q_max, nbins=spec.nbins, widened=spec.widened)
         for sel, spec in segments
     )
+    evaluated: npt.NDArray[np.bool_] | None = None
+    if any(o.evaluated is not None and not o.evaluated.all() for o in outs):
+        evaluated = np.ones(nf, dtype=bool)
+        for (sel, _), out in zip(segments, outs, strict=True):
+            if out.evaluated is not None:
+                evaluated[sel] = out.evaluated
+    options = SearchOptions(
+        sign=opts.sign_name, min_points=opts.min_points,
+        dlogq=opts.dlogq if impl.method == "fast" else None,
+        coarse_factor=opts.coarse_factor if impl.method == "fast" else 1,
+        n_refine=opts.n_refine, rescale_errors=info.rescale_errors if info else False,
+        requested_backend=info.requested_backend if info else None,
+        fallback=info.fallback if info else None)
 
     if impl.exact:
         bests = [o.best for o in outs if o.best is not None]
@@ -200,10 +218,13 @@ def execute(
         best_power=best_power,
         bands=prep.labels,
         n_bands_used=n_used,
-        band_chi2_red=prep.band_chi2_red,
+        # a copy: the result must not alias state a later search re-reads
+        band_chi2_red=None if prep.band_chi2_red is None else prep.band_chi2_red.copy(),
         method=impl.method,
         backend=impl.backend,
         segments=records,
+        options=options,
+        evaluated=evaluated,
     )
 
 
