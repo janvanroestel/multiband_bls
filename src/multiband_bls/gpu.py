@@ -65,9 +65,10 @@ _THREADS = 256  # threads per block. Hard-coded into the kernels: the exact
 # kernels size their static reduction as `red[256]`, and the fast kernels assume
 # exactly 256/32 = 8 warps (`warp_max[8]`). Changing this requires editing those
 # reduction sizes in the kernel source and recompiling.
-# Stack arrays in the CUDA multiband kernels are fixed-size; recompile after
-# changing _MAX_BANDS (update every fixed [8] per-band array declaration in the
-# kernel sources: bw, s/r/cnt in the exact kernel; bw in the fast kernel).
+# The CUDA multiband kernels are specialised per band count (-DNB), so the band loops
+# unroll and the per-band arrays live in registers. The arrays are still declared with
+# a fixed size [8]; change _MAX_BANDS together with every such declaration (bw, bn, s,
+# r, cnt in the exact kernel; bw in the fast kernel). Each band count compiles once.
 _MAX_BANDS: int = 8
 # The fast kernels count in-transit points in float32 bins and gate them against
 # ``count - 0.5f``; both are exact only below 2**23 (float32 spacing <= 0.5), so
@@ -175,15 +176,21 @@ void eebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
 _MULTI_SRC = r"""
 // Exact multiband binned BLS in double precision. Persistent grid-stride over
 // frequencies (blocks capped in Python) with __restrict__ + __ldg on global reads;
-// band weights cached in registers.
+// band weights cached in registers. Compile with -DNB=<n_bands> to specialise on
+// the band count (unrolled band loops; per-band arrays in registers).
 extern "C" __global__ __launch_bounds__(256)
 void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                    const double* __restrict__ w,
                    const int* __restrict__ band, const double* __restrict__ band_w,
                    const int* __restrict__ band_n,
-                   int n, int n_bands, int nf,
+                   int n, int n_bands_in, int nf,
                    const double* __restrict__ freqs, int nb, int kmi, int kma,
                    int min_points, double* power, int* kout, double sg) {
+#ifdef NB
+    const int n_bands = NB;                  // compile-time: band loops unroll and the
+#else                                        // per-band arrays stay in registers
+    const int n_bands = n_bands_in;
+#endif
     extern __shared__ double sh[];           // ybin/rbin/cbin each n_bands*nb
     double* ybin = sh;
     double* rbin = sh + n_bands * nb;
@@ -195,6 +202,7 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
 
     double bw[8];                            // band weights cached in registers
     int bn[8];                               // points per band
+    #pragma unroll
     for (int b = 0; b < n_bands; b++) { bw[b] = __ldg(&band_w[b]); bn[b] = __ldg(&band_n[b]); }
 
     for (int f = blockIdx.x; f < nf; f += gridDim.x) {
@@ -216,10 +224,12 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
         double best = 0.0; int best_k = 0;
         double s[8], r[8]; int cnt[8];
         for (int i1 = tid; i1 < nb; i1 += blockDim.x) {
+            #pragma unroll
             for (int b = 0; b < n_bands; b++) { s[b] = 0; r[b] = 0; cnt[b] = 0; }
             int total = 0;
             for (int ww = 1; ww <= kma; ++ww) {
                 int jj = i1 + ww - 1; if (jj >= nb) jj -= nb;  // single wrap safe: kma <= nb
+                #pragma unroll
                 for (int b = 0; b < n_bands; b++) {
                     s[b] += ybin[b * nb + jj]; r[b] += rbin[b * nb + jj];
                     cnt[b] += (int)cbin[b * nb + jj]; total += (int)cbin[b * nb + jj];
@@ -227,6 +237,7 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                 if (ww < kmi) continue;
                 if (total < min_points) continue;
                 double T3 = 0.0; int kk = 0;
+                #pragma unroll
                 for (int b = 0; b < n_bands; b++) {
                     // identifiable only with points both in and out of the window
                     if (cnt[b] < 1 || cnt[b] >= bn[b]) continue;
@@ -409,6 +420,9 @@ _FAST_BOX_MULTI_SRC = _FAST_HELPERS + r"""
 // drops float32 cumsum-cancellation residue in empty windows).
 // Float32 bins; float-float phase fold; band_w in registers; SR^2 comparison;
 // warp-shuffle reduction; persistent grid-stride; __launch_bounds__ + __ldg.
+// Compile with -DNB=<n_bands> to specialise on the band count (band loops unroll and
+// the per-band arrays live in registers; without it n_bands is a runtime argument).
+// Compile with -DMINB=<k> to set the minimum blocks per SM for __launch_bounds__.
 // Compile with -DWITH_K to also write the contributing-band count of each
 // frequency's best window to kout (n_bands_used); without it kout is unused.
 // Shared memory: (3*n_bands*nb + 8) * 4 bytes, + 32 B with WITH_K
@@ -433,6 +447,7 @@ __device__ __forceinline__ void eval_window(
     // afterwards (same result as the CPU's gate-then-sum, without per-band
     // scratch arrays).
     float cnt_tot = 0.f, sr2 = 0.f; int kk = 0;
+    #pragma unroll
     for (int b = 0; b < n_bands; b++) {
         const float* cy = sh + b * nb;
         const float* cr = sh + tot + b * nb;
@@ -477,7 +492,13 @@ __device__ __forceinline__ void eval_window(
 #define EVAL(i1_, wi_) eval_window(sh, widths, bw, i1_, wi_, nb, tot, n_bands, \
                                    min_cnt, sg, best2)
 #endif
-extern "C" __global__ __launch_bounds__(256, 4)
+// Minimum resident blocks per SM promised to the register allocator. The host picks it
+// from what shared memory allows (-DMINB=...): demanding 4 blocks when only 2 fit
+// caps registers for nothing (measured ~11% slower at 6-8 bands, nb = 500).
+#ifndef MINB
+#define MINB 4
+#endif
+extern "C" __global__ __launch_bounds__(256, MINB)
 void meebls_fast_kernel(
     const float* __restrict__ t_hi,
     const float* __restrict__ t_lo,
@@ -485,11 +506,16 @@ void meebls_fast_kernel(
     const float* __restrict__ w,
     const int* __restrict__ band,
     const double* __restrict__ band_w,
-    int n, int n_bands, int nf,
+    int n, int n_bands_in, int nf,
     const double* __restrict__ freqs, int nb,
     const int* __restrict__ widths, int n_widths,
     int min_points, double* power, int* kout, float sg)
 {
+#ifdef NB
+    const int n_bands = NB;                   // compile-time: unrolled loops, bw[] in regs
+#else
+    const int n_bands = n_bands_in;
+#endif
     extern __shared__ float sh[];             // ybin[b][nb], rbin[b][nb], cbin[b][nb]
     float* warp_max = sh + 3 * n_bands * nb;  // 8 floats (one per warp)
 #ifdef WITH_K
@@ -504,6 +530,7 @@ void meebls_fast_kernel(
 
     // Load band weights into registers (avoids repeated global-mem reads in hot loop)
     float bw[8];
+    #pragma unroll
     for (int b = 0; b < n_bands; b++) bw[b] = (float)__ldg(&band_w[b]);
 
     for (int f = blockIdx.x; f < nf; f += gridDim.x) {
@@ -596,10 +623,12 @@ void meebls_fast_kernel(
 """
 
 _single_kernel: Any = None
-_multi_kernel: Any = None
 _fast_single_kernel: Any = None
-_fast_multi_kernel: Any = None
-_fast_multi_kernel_k: Any = None  # WITH_K variant (n_bands_used)
+# Multiband kernels are specialised on the band count (-DNB) so the per-band loops
+# unroll; one compiled kernel per (n_bands, with_k), built on first use.
+_multi_kernels: dict[int, Any] = {}
+_fast_multi_kernels: dict[tuple[int, bool, int], Any] = {}
+_smem_per_sm: int = 102400  # updated at first _kernels() call from device attributes
 _max_smem: int = 65536  # updated at first _kernels() call from device attributes
 
 
@@ -613,40 +642,67 @@ def gpu_available() -> bool:
         return False
 
 
+def _opt_in_smem(kernel: Any) -> Any:
+    """Raise ``kernel``'s dynamic shared-memory limit to the device maximum.
+
+    The requested dynamic size must leave room for the kernel's own static shared
+    memory (the exact kernels carry a static ``red[256]`` reduction buffer), so the
+    static size is subtracted from the opt-in ceiling.
+    """
+    kernel.max_dynamic_shared_size_bytes = _max_smem - kernel.attributes["shared_size_bytes"]
+    return kernel
+
+
 def _kernels() -> None:
-    global _single_kernel, _multi_kernel
-    global _fast_single_kernel, _fast_multi_kernel, _fast_multi_kernel_k
-    global _max_smem
+    global _single_kernel, _fast_single_kernel, _max_smem, _smem_per_sm
     if _single_kernel is None:
         import cupy as cp
 
-        _max_smem = cp.cuda.Device().attributes["MaxSharedMemoryPerBlockOptin"]
-        _single_kernel = cp.RawKernel(_SINGLE_SRC, "eebls_kernel")
-        _multi_kernel = cp.RawKernel(_MULTI_SRC, "meebls_kernel")
-        _fast_single_kernel = cp.RawKernel(_FAST_BOX_SINGLE_SRC, "eebls_fast_kernel")
-        _fast_multi_kernel = cp.RawKernel(_FAST_BOX_MULTI_SRC, "meebls_fast_kernel")
-        _fast_multi_kernel_k = cp.RawKernel(_FAST_BOX_MULTI_SRC, "meebls_fast_kernel",
-                                            options=("-DWITH_K",))
-        # Opt into the device maximum for dynamic shared memory. The requested
-        # dynamic size must leave room for the kernel's own static shared memory
-        # (the exact kernels carry a static `red[256]` reduction buffer), so
-        # subtract that from the opt-in ceiling.
-        _single_kernel.max_dynamic_shared_size_bytes = (
-            _max_smem - _single_kernel.attributes["shared_size_bytes"]
+        attrs = cp.cuda.Device().attributes
+        _max_smem = attrs["MaxSharedMemoryPerBlockOptin"]
+        _smem_per_sm = attrs["MaxSharedMemoryPerMultiprocessor"]
+        _single_kernel = _opt_in_smem(cp.RawKernel(_SINGLE_SRC, "eebls_kernel"))
+        _fast_single_kernel = _opt_in_smem(
+            cp.RawKernel(_FAST_BOX_SINGLE_SRC, "eebls_fast_kernel")
         )
-        _multi_kernel.max_dynamic_shared_size_bytes = (
-            _max_smem - _multi_kernel.attributes["shared_size_bytes"]
-        )
-        _fast_single_kernel.max_dynamic_shared_size_bytes = (
-            _max_smem - _fast_single_kernel.attributes["shared_size_bytes"]
-        )
-        _fast_multi_kernel.max_dynamic_shared_size_bytes = (
-            _max_smem - _fast_multi_kernel.attributes["shared_size_bytes"]
-        )
-        _fast_multi_kernel_k.max_dynamic_shared_size_bytes = (
-            _max_smem - _fast_multi_kernel_k.attributes["shared_size_bytes"]
-        )
-    # fast kernels are accessed as module globals by the fast entry points
+    # the multiband kernels are built per band count by the *_multi_kernel getters
+
+
+def _multi_kernel_for(n_bands: int) -> Any:
+    """Exact multiband kernel specialised for ``n_bands`` bands (cached)."""
+    _kernels()
+    k = _multi_kernels.get(n_bands)
+    if k is None:
+        import cupy as cp
+
+        k = _opt_in_smem(cp.RawKernel(_MULTI_SRC, "meebls_kernel",
+                                      options=(f"-DNB={n_bands}",)))
+        _multi_kernels[n_bands] = k
+    return k
+
+
+def _min_blocks_hint(shared: int) -> int:
+    """Minimum resident blocks per SM for ``__launch_bounds__``: what shared memory
+    allows (about 1 KB per block is reserved), clamped to [1, 4]."""
+    return max(1, min(4, _smem_per_sm // (shared + 1024)))
+
+
+def _fast_multi_kernel_for(n_bands: int, with_k: bool, shared: int) -> Any:
+    """Fast multiband kernel specialised for ``n_bands`` bands (cached).
+
+    ``with_k`` selects the variant that also writes ``n_bands_used``; ``shared`` is the
+    dynamic shared memory per block, which sets the launch-bounds block hint.
+    """
+    _kernels()
+    minb = _min_blocks_hint(shared)
+    k = _fast_multi_kernels.get((n_bands, with_k, minb))
+    if k is None:
+        import cupy as cp
+
+        opts = (f"-DNB={n_bands}", f"-DMINB={minb}") + (("-DWITH_K",) if with_k else ())
+        k = _opt_in_smem(cp.RawKernel(_FAST_BOX_MULTI_SRC, "meebls_fast_kernel", options=opts))
+        _fast_multi_kernels[(n_bands, with_k, minb)] = k
+    return k
 
 
 def _split_time(t: Array) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
@@ -813,8 +869,9 @@ def multiband_eebls_gpu(
     k_d = cp.zeros(nf, dtype=cp.int32)
     kmi, kma = _grid_params(nbins, q_min, q_max)
 
+    multi_kernel = _multi_kernel_for(n_bands)
     shared = 3 * n_bands * nbins * 8
-    smem_cap = _multi_kernel.max_dynamic_shared_size_bytes
+    smem_cap = multi_kernel.max_dynamic_shared_size_bytes
     if shared > smem_cap:
         raise ValueError(
             f"multiband_eebls_gpu needs {shared} B of dynamic shared memory "
@@ -822,7 +879,7 @@ def multiband_eebls_gpu(
             f"{smem_cap} B; reduce nbins or n_bands."
         )
     n_blocks = min(nf, 2048)
-    _multi_kernel((n_blocks,), (_THREADS,),
+    multi_kernel((n_blocks,), (_THREADS,),
                   (t_d, wx_d, w_d, band_d, bw_d, bn_d, np.int32(t_d.size), np.int32(n_bands),
                    np.int32(nf), f_d, np.int32(nbins), np.int32(kmi), np.int32(kma),
                    np.int32(min(min_points, t_d.size + 1)), power_d, k_d, np.float64(sg)),
@@ -1081,7 +1138,6 @@ def multiband_eebls_gpu_fast(
     compute_n_bands_used = compute_n_bands_used and not _coarse_active(
         freqs_np.size, coarse_factor)
     _kernels()  # ensure compiled
-    kernel = _fast_multi_kernel_k if compute_n_bands_used else _fast_multi_kernel
     # Median-uncertainty units keep sy**2 and the band weights inside float32 range
     # for any flux scale (the power is scale-invariant); refinement uses `bands`.
     f_scale = _flux_scale([b[2] for b in bands.values()])
@@ -1121,6 +1177,7 @@ def multiband_eebls_gpu_fast(
     # float32: ybin + rbin + cbin (per band) + warp_max[8] (+ int warp_k[8])
     n_extra = 16 if compute_n_bands_used else 8
     shared = (3 * n_bands * nbins + n_extra) * 4
+    kernel = _fast_multi_kernel_for(n_bands, compute_n_bands_used, shared)
     smem_cap = kernel.max_dynamic_shared_size_bytes
     if shared > smem_cap:
         raise ValueError(
