@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from .periodogram import BLSResult
+from .result import BLSResult
 
 try:
     __version__ = version("multiband_bls")

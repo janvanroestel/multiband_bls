@@ -32,19 +32,21 @@ import numpy as np
 import numpy.typing as npt
 
 from . import _eebls, _fast, _meebls, _msbls, _sbls  # type: ignore[attr-defined]
-from .periodogram import BLSResult
-from .reference import (
-    _check_phase_range,
-    _check_sign,
+from ._prep import (
     _merge_band_arrays,
     _prepare_bands,
-    _validate_light_curve,
-    _validate_search_params,
     auto_nbins,
     preprocess,
     variance_explained,
     width_bounds,
 )
+from ._validate import (
+    _check_phase_range,
+    _check_sign,
+    _validate_light_curve,
+    _validate_search_params,
+)
+from .result import BLSResult
 
 logger = logging.getLogger(__name__)
 

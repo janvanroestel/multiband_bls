@@ -30,6 +30,8 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from ._prep import _prepare_bands, auto_nbins
+from ._validate import _check_phase_range, _validate_light_curve, _validate_search_params
 from .api import (
     _check_coarse,
     _check_dlogq,
@@ -48,14 +50,7 @@ from .api import (
     eebls,
     multiband_eebls,
 )
-from .periodogram import BLSResult
-from .reference import (
-    _check_phase_range,
-    _prepare_bands,
-    _validate_light_curve,
-    _validate_search_params,
-    auto_nbins,
-)
+from .result import BLSResult
 
 logger = logging.getLogger(__name__)
 

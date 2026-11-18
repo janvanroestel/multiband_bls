@@ -32,8 +32,8 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from .periodogram import BLSResult
-from .reference import auto_nbins
+from ._prep import auto_nbins
+from .result import BLSResult
 
 logger = logging.getLogger(__name__)
 
