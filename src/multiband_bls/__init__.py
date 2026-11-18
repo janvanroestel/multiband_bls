@@ -37,7 +37,8 @@ try:
     __version__ = version("multiband_bls")
 except PackageNotFoundError:  # pragma: no cover - source tree without install
     __version__ = "0.0.0"
-from .density import density_bls, density_duration_bounds, density_frequency_grid
+from .config import DensityPrior, SearchConfig
+from .density import density_duration_bounds, density_frequency_grid
 from .reference import (
     build_frequency_grid,
     coadd_bands,
@@ -56,6 +57,7 @@ try:  # compiled cores are optional until the extension is built
         multiband_sparse_bls,
         sparse_bls,
     )
+    from .search import PreparedData, bls, bls_prepare
 except ImportError:  # pragma: no cover
     import warnings
 
@@ -77,6 +79,7 @@ except ImportError:  # pragma: no cover
         )
 
     eebls_fast = multiband_eebls_fast = _fast_unavailable  # type: ignore[assignment]
+    bls = bls_prepare = _fast_unavailable  # type: ignore[assignment]
 
 # GPU (CuPy) backends -- import lazily; cupy itself is only needed at call time.
 # When the module can't be imported at all (missing compiled cores), the GPU
@@ -124,7 +127,11 @@ __all__ = [
     "multiband_sparse_bls_reference",
     "multiband_eebls_reference",
     "build_frequency_grid",
-    "density_bls",
+    "bls",
+    "bls_prepare",
+    "PreparedData",
+    "SearchConfig",
+    "DensityPrior",
     "density_duration_bounds",
     "density_frequency_grid",
     "coadd_bands",

@@ -14,11 +14,11 @@ from typing import Any
 import numpy as np
 
 import multiband_bls as mb
-from multiband_bls import BLSResult
-from multiband_bls.density import density_bls
+from multiband_bls import BLSResult, DensityPrior, SearchConfig, bls
 
 GOLDEN = Path(__file__).parent / "data" / "golden_v0.npz"
 PERIOD = 0.37
+_DENSITY = SearchConfig(density_prior=DensityPrior((0.2, 5.0)))
 
 
 def _bands() -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
@@ -58,10 +58,10 @@ def cases() -> dict[str, Callable[[], BLSResult]]:
         "meebls_rescale": lambda: mb.multiband_eebls(b, f, rescale_errors=True, sign="negative"),
         "meebls_fast": lambda: mb.multiband_eebls_fast(b, f),
         "meebls_fast_rescale": lambda: mb.multiband_eebls_fast(b, f, rescale_errors=True),
-        "density_eebls": lambda: density_bls(mb.eebls, *s, frequencies=f,
-                                             density_range=(0.2, 5.0)),
-        "density_meebls_fast": lambda: density_bls(mb.multiband_eebls_fast, b, frequencies=f,
-                                                   density_range=(0.2, 5.0)),
+        # recorded from the pre-engine density_bls wrapper: the new bls() path must match
+        "density_eebls": lambda: bls(s, f, method="binned", backend="cpu", config=_DENSITY),
+        "density_meebls_fast": lambda: bls(b, f, method="fast", backend="cpu",
+                                           config=_DENSITY),
     }
     return c
 

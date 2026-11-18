@@ -1347,7 +1347,7 @@ def test_cpu_fast_rejects_int32_phase_overflow_in_core():
 # Opt-in coarse-to-fine frequency search                                       #
 # --------------------------------------------------------------------------- #
 def test_coarse_to_fine_helper_unit():
-    from multiband_bls.api import _coarse_to_fine
+    from multiband_bls._common import _coarse_to_fine
 
     f = np.linspace(1.0, 2.0, 1001)
     calls: list[int] = []
@@ -1685,7 +1685,7 @@ def test_sign_gpu_selects_and_validates():
 
 
 def test_coarse_to_fine_handles_duplicate_frequencies(lightcurve, freqs):
-    from multiband_bls.api import _coarse_to_fine
+    from multiband_bls._common import _coarse_to_fine
 
     calls: list[int] = []
 

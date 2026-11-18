@@ -1,0 +1,250 @@
+"""Tests for the bls() front door, the engine's backends and the compatibility facades."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+import multiband_bls as mb
+from multiband_bls import DensityPrior, SearchConfig, bls, bls_prepare
+
+from .golden_cases import _bands, _freqs, _single, flatten
+
+B, F, S = _bands(), _freqs(), _single()
+
+# (legacy function, bls kwargs, data kind)
+_CPU = [
+    (mb.sparse_bls, {"method": "sparse"}, "single"),
+    (mb.eebls, {"method": "binned"}, "single"),
+    (mb.eebls_fast, {"method": "fast"}, "single"),
+    (mb.multiband_sparse_bls, {"method": "sparse"}, "multi"),
+    (mb.multiband_eebls, {"method": "binned"}, "multi"),
+    (mb.multiband_eebls_fast, {"method": "fast"}, "multi"),
+]
+
+
+def _same(a, b):
+    fa, fb = flatten(a), flatten(b)
+    assert set(fa) == set(fb)
+    for k in fa:
+        np.testing.assert_array_equal(fa[k], fb[k], err_msg=k)
+
+
+@pytest.mark.parametrize(("legacy", "kw", "kind"), _CPU, ids=[c[0].__name__ for c in _CPU])
+def test_bls_matches_legacy_cpu(legacy, kw, kind):
+    data = S if kind == "single" else B
+    old = legacy(*S, F) if kind == "single" else legacy(B, F)
+    new = bls(data, F, backend="cpu", **kw)
+    _same(old, new)
+    assert new.backend == "cpu" and new.method == kw["method"]
+
+
+@pytest.mark.parametrize("sign", ["positive", "negative"])
+def test_bls_sign_and_rescale_match_legacy(sign):
+    old = mb.multiband_eebls(B, F, rescale_errors=True, sign=sign, min_points=5)
+    new = bls(B, F, method="binned", backend="cpu", rescale_errors=True,
+              config=SearchConfig(sign=sign, min_points=5))
+    _same(old, new)
+
+
+def test_fast_options_pass_through():
+    old = mb.multiband_eebls_fast(B, F, dlogq=0.0, coarse_factor=3, n_refine=4, nbins=90)
+    new = bls(B, F, method="fast", backend="cpu", dlogq=0.0, coarse_factor=3, n_refine=4,
+              config=SearchConfig(nbins=90))
+    _same(old, new)
+
+
+def test_result_records_provenance():
+    res = bls(B, F, method="binned", backend="cpu", config=SearchConfig(q_min=0.02, q_max=0.1))
+    assert (res.method, res.backend) == ("binned", "cpu")
+    assert res.segments is not None and len(res.segments) == 1
+    seg = res.segments[0]
+    assert (seg.q_min, seg.q_max, seg.n_freqs) == (0.02, 0.1, F.size)
+    assert seg.f_min == F.min() and seg.f_max == F.max() and seg.nbins == 250
+    assert res.has_solution
+    sparse = bls(S, F, method="sparse", backend="cpu")
+    assert sparse.segments[0].nbins is None and sparse.segments[0].q_max == 0.15
+
+
+def test_has_solution_false_without_detection():
+    t, _, dy = S
+    res = bls((t, np.ones_like(t), dy), F, method="binned", backend="cpu")
+    assert not res.has_solution and res.best_power == 0.0
+
+
+def test_period_range_builds_the_grid():
+    t = S[0]
+    res = bls(S, p_min=0.3, p_max=0.5, method="fast", backend="cpu")
+    ref = mb.build_frequency_grid(t, p_min=0.3, p_max=0.5, q_min=0.01)
+    np.testing.assert_array_equal(res.frequency, ref)
+    cfg = SearchConfig(density_prior=DensityPrior((0.2, 5.0)))
+    dres = bls(S, p_min=0.3, p_max=0.5, method="fast", backend="cpu", config=cfg)
+    np.testing.assert_array_equal(
+        dres.frequency, cfg.density_prior.grid(t, 0.3, 0.5))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"method": "nope"}, "method"),
+        ({"backend": "tpu"}, "backend"),
+        ({"method": "sparse", "backend": "gpu"}, "no GPU"),
+        ({"method": "sparse", "config": SearchConfig(nbins=50)}, "nbins"),
+        ({"rescale_errors": True}, "multiband"),
+        ({"p_min": 0.3}, "frequencies"),
+        ({"frequencies": F, "p_min": 0.3, "p_max": 0.5}, "not both"),
+        ({"config": SearchConfig(sign="sideways")}, "sign"),
+    ],
+)
+def test_bls_rejects_bad_arguments(kwargs, match):
+    kwargs.setdefault("frequencies", None if "p_min" in kwargs else F)
+    with pytest.raises(ValueError, match=match):
+        bls(S, backend=kwargs.pop("backend", "cpu"), **kwargs)
+
+
+def test_bls_rejects_bad_data_shape():
+    with pytest.raises(ValueError, match="data must be"):
+        bls(S[:2], F)
+    with pytest.raises(ValueError, match="frequencies"):
+        bls(S)  # neither frequencies nor p_min/p_max
+
+
+def test_auto_backend_falls_back_on_capability_limit():
+    # nbins far beyond any GPU's shared memory: auto must still search, on the CPU
+    res = bls(B, F[:20], method="binned", backend="auto", config=SearchConfig(nbins=9000))
+    assert res.backend == "cpu" and res.method == "binned"
+
+
+def test_auto_backend_is_cpu_for_sparse():
+    assert bls(S, F, method="sparse").backend == "cpu"
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize(("legacy", "kw", "kind"), [
+    (mb.eebls_gpu, {"method": "binned"}, "single"),
+    (mb.eebls_gpu_fast, {"method": "fast"}, "single"),
+    (mb.multiband_eebls_gpu, {"method": "binned"}, "multi"),
+    (mb.multiband_eebls_gpu_fast, {"method": "fast"}, "multi"),
+])
+def test_bls_matches_legacy_gpu(legacy, kw, kind):
+    if not mb.gpu_available():
+        pytest.skip("no GPU")
+    old = legacy(*S, F) if kind == "single" else legacy(B, F)
+    new = bls(S if kind == "single" else B, F, backend="gpu", **kw)
+    np.testing.assert_allclose(new.power, old.power, rtol=1e-4, atol=1e-6)
+    assert new.best_frequency == old.best_frequency and new.backend == "gpu"
+    auto = bls(S if kind == "single" else B, F, backend="auto", **kw)
+    assert auto.backend == "gpu"
+
+
+# --------------------------------------------------------------------------- #
+# prepared data, mutation, hoisting                                            #
+# --------------------------------------------------------------------------- #
+def _copy_bands():
+    return {k: tuple(a.copy() for a in v) for k, v in B.items()}
+
+
+def test_each_call_sees_current_inputs_after_in_place_mutation():
+    bands = _copy_bands()
+    r1 = bls(bands, F, method="binned", backend="cpu")
+    bands["g"][1][:] = bands["g"][1] + np.linspace(0.0, 1.0, bands["g"][1].size)  # edit y
+    r2 = bls(bands, F, method="binned", backend="cpu")
+    fresh = bls(_copy_bands() | {"g": bands["g"]}, F, method="binned", backend="cpu")
+    assert not np.array_equal(r1.power, r2.power)
+    np.testing.assert_array_equal(r2.power, fresh.power)
+    bands["r"] = bands["r"][0][:50], bands["r"][1][:50], bands["r"][2][:50]  # edit mapping
+    r3 = bls(bands, F, method="binned", backend="cpu")
+    assert not np.array_equal(r2.power, r3.power)
+
+
+def test_prepared_snapshot_is_immune_to_later_mutation():
+    bands = _copy_bands()
+    snap = bls_prepare(bands, method="fast")
+    before = bls(snap, F)
+    bands["g"][1][:] = 0.0
+    bands["g"][2][:] = 1.0
+    after = bls(snap, F)
+    _same(before, after)
+    _same(before, bls(B, F, method="fast", backend="cpu"))
+    assert after.method == "fast" and after.backend == "cpu"
+
+
+def test_prepared_snapshot_conflicts_and_period_range():
+    snap = bls_prepare(S, method="binned")
+    with pytest.raises(ValueError, match="conflicts"):
+        bls(snap, F, method="fast")
+    with pytest.raises(ValueError, match="rescale_errors"):
+        bls(snap, F, rescale_errors=True)
+    res = bls(snap, p_min=0.3, p_max=0.5)
+    assert res.frequency.size == mb.build_frequency_grid(S[0], p_min=0.3, p_max=0.5).size
+    with pytest.raises(ValueError, match="method"):
+        bls_prepare(S, method="bad")
+    with pytest.raises(ValueError, match="backend"):
+        bls_prepare(S, backend="bad")
+    with pytest.raises(ValueError, match="multiband"):
+        bls_prepare(S, rescale_errors=True)
+    snap_r = bls_prepare(B, rescale_errors=True)
+    _same(bls(snap_r, F), bls(B, F, rescale_errors=True, backend="cpu"))
+
+
+def test_multi_segment_search_preprocesses_and_refits_once(monkeypatch):
+    from multiband_bls.backends import cpu
+
+    calls = {"prepare": 0, "merge": 0, "refine": 0}
+    for name, key in (("_prepare_bands", "prepare"), ("_merge_bands", "merge")):
+        orig = getattr(cpu, name)
+
+        def wrapped(*a, _orig=orig, _key=key, **k):
+            calls[_key] += 1
+            return _orig(*a, **k)
+
+        monkeypatch.setattr(cpu, name, wrapped)
+    orig_refine = cpu.FastMulti.refine
+
+    def refine(self, *a, **k):
+        calls["refine"] += 1
+        return orig_refine(self, *a, **k)
+
+    monkeypatch.setattr(cpu.FastMulti, "refine", refine)
+    cfg = SearchConfig(density_prior=DensityPrior((0.2, 5.0)))
+    f = np.geomspace(0.5, 20.0, 600)
+    res = bls(B, f, method="fast", backend="cpu", config=cfg)
+    assert len(res.segments) > 5
+    assert calls == {"prepare": 1, "merge": 1, "refine": 1}
+
+
+# --------------------------------------------------------------------------- #
+# compatibility facades                                                        #
+# --------------------------------------------------------------------------- #
+def test_legacy_import_paths_and_identity():
+    import multiband_bls.api as api
+    import multiband_bls.gpu as gpu
+    import multiband_bls.periodogram as periodogram
+    import multiband_bls.reference as reference
+    import multiband_bls.result as result
+
+    for name in ("sparse_bls", "eebls", "multiband_sparse_bls", "multiband_eebls",
+                 "eebls_fast", "multiband_eebls_fast"):
+        assert getattr(api, name) is getattr(mb, name)
+    for name in ("eebls_gpu", "eebls_gpu_fast", "multiband_eebls_gpu",
+                 "multiband_eebls_gpu_fast", "gpu_available"):
+        assert getattr(gpu, name) is getattr(mb, name)
+    assert periodogram.BLSResult is result.BLSResult is mb.BLSResult
+    for name in ("preprocess", "auto_nbins", "variance_explained", "build_frequency_grid",
+                 "coadd_bands", "width_bounds", "_prepare_bands", "_merge_band_arrays",
+                 "_validate_search_params", "_check_sign", "_check_phase_range",
+                 "sparse_bls_reference", "eebls_reference"):
+        assert callable(getattr(reference, name))
+    assert reference.build_frequency_grid is mb.build_frequency_grid
+
+
+def test_registry_lists_all_ten_implementations():
+    from multiband_bls.backends import available_implementations, get_implementation
+
+    keys = available_implementations()
+    cpu = [k for k in keys if k[1] == "cpu"]
+    assert len(cpu) == 6
+    assert len(keys) in (6, 10)
+    assert ("binned", "gpu", True) in keys
+    with pytest.raises(ValueError, match="no implementation"):
+        get_implementation("sparse", "gpu", False)

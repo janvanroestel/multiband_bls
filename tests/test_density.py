@@ -6,17 +6,20 @@ import numpy as np
 import pytest
 
 from multiband_bls import (
-    BLSResult,
-    density_bls,
+    DensityPrior,
+    SearchConfig,
+    bls,
     density_duration_bounds,
     density_frequency_grid,
-    eebls,
-    eebls_fast,
-    multiband_eebls,
-    multiband_eebls_fast,
-    multiband_sparse_bls,
 )
 from multiband_bls.density import RHO_SUN, central_duration_fraction
+from multiband_bls.engine import (
+    BestFit,
+    Implementation,
+    RunOutput,
+    SegmentSpec,
+    execute,
+)
 
 RHO = (0.2, 5.0)
 
@@ -63,42 +66,121 @@ def test_grid_is_sparser_than_uniform_and_resolves_narrowest_box():
     assert grid.size < uniform_n / 3
 
 
-class _Recorder:
-    """Stand-in search that records the arguments of each call."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def __call__(self, t, frequencies, q_min, q_max, nbins=None, min_points=3):
-        self.calls.append({"f": frequencies.copy(), "q_min": q_min, "q_max": q_max,
-                           "nbins": nbins})
-        p = frequencies.copy()
-        return BLSResult(frequency=frequencies, power=p, best_frequency=float(p.argmax()),
-                         best_period=1.0, best_t0=0.0, best_duration=0.1,
-                         best_depth=0.0, best_power=float(p.max()))
+def _prior(**kw):
+    return DensityPrior(RHO, **kw)
 
 
 def test_segments_cover_grid_and_bound_physical_q():
-    rec = _Recorder()
     rng = np.random.default_rng(0)
     freqs = rng.permutation(np.geomspace(0.1, 20.0, 400))  # unsorted input
-    res = density_bls(rec, 0.0, frequencies=freqs, density_range=RHO, q_step=1.3)
-    assert len(rec.calls) > 3
-    assert np.array_equal(np.sort(np.concatenate([c["f"] for c in rec.calls])), np.sort(freqs))
-    np.testing.assert_array_equal(res.frequency, freqs)
-    np.testing.assert_array_equal(res.power, freqs)  # output follows caller's order
-    for c in rec.calls:
-        lo, hi = density_duration_bounds(c["f"], RHO)
-        assert c["q_min"] <= lo.min() * (1 + 1e-12) and c["q_max"] >= hi.max() * (1 - 1e-12)
-        assert hi.max() / hi.min() <= 1.3 * 1.0001 or c["q_max"] == pytest.approx(0.25)
-    # long periods get narrower minimum width and so more bins
-    nb = [c["nbins"] for c in sorted(rec.calls, key=lambda c: c["f"][0])]
+    segs = _prior(q_step=1.3).segments(freqs, binned=True)
+    assert len(segs) > 3
+    idx = np.concatenate([i for i, _ in segs])
+    assert np.array_equal(np.sort(idx), np.arange(freqs.size))  # every frequency, once
+    for sel, spec in segs:
+        lo, hi = density_duration_bounds(freqs[sel], RHO)
+        assert spec.q_min <= lo.min() * (1 + 1e-12) and spec.q_max >= hi.max() * (1 - 1e-12)
+        assert hi.max() / hi.min() <= 1.3 * 1.0001 or spec.q_max == pytest.approx(0.25)
+    # long periods get a narrower minimum width and so more bins
+    nb = [spec.nbins for _, spec in sorted(segs, key=lambda x: freqs[x[0]][0])]
     assert nb == sorted(nb, reverse=True)
+    assert all(spec.nbins is None for _, spec in _prior().segments(freqs, binned=False))
 
 
-def test_rejects_explicit_q():
-    with pytest.raises(ValueError, match="q_min"):
-        density_bls(_Recorder(), 0.0, frequencies=np.array([1.0]), density_range=RHO, q_min=0.01)
+def test_segment_ends_when_lower_bound_grows_even_if_upper_is_capped():
+    # q_hi is pinned at q_cap for both, but q_lo differs ~7x: must not share a segment
+    segs = _prior().segments(np.array([2.0, 20.0]), binned=True)
+    assert len(segs) == 2
+    for sel, spec in segs:
+        lo, hi = density_duration_bounds(np.array([2.0, 20.0])[sel], RHO)
+        assert spec.q_min == pytest.approx(lo.min()) and spec.q_max >= hi.max() * (1 - 1e-12)
+
+
+def test_unrepresentable_width_range_is_widened():
+    # q ~ 0.0764 at 1/day with 65 bins: no integer width fits, so q_max moves up to one
+    prior = DensityPrior((1.0, 1.0), (1.0, 1.0))
+    ((_, spec),) = prior.segments(np.array([1.0]), binned=True)
+    assert spec.q_max > spec.q_min
+    assert np.ceil(spec.q_min * spec.nbins - 1e-9) <= np.floor(spec.q_max * spec.nbins + 1e-9)
+
+
+def test_config_exclusivity_and_defaults():
+    with pytest.raises(ValueError, match="density_prior"):
+        SearchConfig(q_min=0.01, density_prior=_prior())
+    with pytest.raises(ValueError, match="density_prior"):
+        SearchConfig(q_max=0.1, density_prior=_prior())
+    assert SearchConfig().resolve_q("sparse") == (0.01, 0.15)
+    assert SearchConfig().resolve_q("binned") == (0.01, 0.10)
+    assert SearchConfig(q_min=0.02, q_max=0.2).resolve_q("fast") == (0.02, 0.2)
+    with pytest.raises(ValueError, match="q_step"):
+        DensityPrior(RHO, q_step=1.0)
+
+
+class _Fake(Implementation):
+    """Stand-in backend recording what the executor asks of it."""
+
+    method, backend, multiband, exact = "binned", "cpu", True, True
+
+    def __init__(self, counts: list[bool], power=None) -> None:
+        self.counts, self.calls, self.n = counts, [], 0
+        self.power = power
+
+    def check_frequencies(self, prep, freqs, opts):
+        pass
+
+    def run(self, prep, freqs, spec, opts):
+        has = self.counts[min(self.n, len(self.counts) - 1)]
+        self.n += 1
+        self.calls.append((freqs.copy(), spec))
+        p = freqs.copy() if self.power is None else self.power(freqs)
+        k = np.full(freqs.size, 3, dtype=np.int64) if has else None
+        best = float(p.max())
+        return RunOutput(p, BestFit(float(freqs[int(np.argmax(p))]), 0.1, 0.01,
+                                    np.array([0.1]), best), k)
+
+
+def _prep(denom=1.0):
+    from multiband_bls.engine import Prepared
+    return Prepared(denom)
+
+
+def test_executor_n_bands_used_is_all_or_nothing():
+    f = np.array([20.0, 0.1])
+    segs = _prior().segments(f, binned=True)
+    assert len(segs) == 2
+    from multiband_bls.engine import RunOptions
+    res = execute(_Fake([True, False]), _prep(), f, segs, RunOptions())
+    assert res.n_bands_used is None
+    res = execute(_Fake([True]), _prep(), f, segs, RunOptions())
+    np.testing.assert_array_equal(res.n_bands_used, [3, 3])
+    assert res.method == "binned" and res.backend == "cpu"
+    assert res.segments is not None and len(res.segments) == 2
+
+
+def test_executor_no_detection_reports_callers_first_frequency():
+    from multiband_bls.engine import RunOptions
+    f = np.array([20.0, 2.0])
+    segs = _prior().segments(f, binned=True)
+    res = execute(_Fake([False], power=np.zeros_like), _prep(), f, segs, RunOptions())
+    assert np.all(res.power == 0.0) and not res.has_solution
+    assert res.best_frequency == 20.0 and res.best_period == pytest.approx(0.05)
+
+
+def test_executor_orders_power_like_the_caller_and_keeps_best():
+    from multiband_bls.engine import RunOptions
+    f = np.array([5.0, 0.2, 1.0, 12.0])
+    segs = _prior().segments(f, binned=True)
+    res = execute(_Fake([False]), _prep(), f, segs, RunOptions())
+    np.testing.assert_array_equal(res.power, f)  # power[i] belongs to frequency[i]
+    assert res.best_frequency == 12.0 and res.has_solution
+
+
+def test_single_segment_executor_passes_frequencies_through_untouched():
+    from multiband_bls.engine import RunOptions
+    fake = _Fake([False])
+    f = np.array([3.0, 1.0, 2.0])  # unsorted, one fixed-q segment
+    execute(fake, _prep(), f, [(slice(None), SegmentSpec(0.01, 0.1, 100))], RunOptions())
+    assert fake.calls[0][0] is f or np.array_equal(fake.calls[0][0], f)
 
 
 def _transit(period, rho, rng, n=400, sigma=0.01, depth=0.05, baseline=60.0):
@@ -113,92 +195,28 @@ def _transit(period, rho, rng, n=400, sigma=0.01, depth=0.05, baseline=60.0):
 def test_recovers_transit_with_density_grid(period):
     rng = np.random.default_rng(int(period * 10))
     t, y, dy, q = _transit(period, 1.0, rng)
-    grid = density_frequency_grid(t, 0.5, 5.0, RHO)
-    res = density_bls(eebls_fast, t, y, dy, frequencies=grid, density_range=RHO)
+    cfg = SearchConfig(density_prior=_prior())
+    res = bls((t, y, dy), p_min=0.5, p_max=5.0, method="fast", backend="cpu", config=cfg)
     assert res.best_period == pytest.approx(period, rel=2e-3)
     assert res.best_duration == pytest.approx(q * period, rel=0.5)
-    assert res.power.shape == grid.shape
+    assert res.power.shape == res.frequency.shape
+    assert res.segments is not None and len(res.segments) > 1
 
 
-def test_multiband_variants_agree_on_recovery():
+def test_multiband_methods_recover_with_density_prior():
     rng = np.random.default_rng(3)
     bands = {}
     for b, depth in {"g": 0.05, "r": 0.03}.items():
         t, y, dy, _ = _transit(2.1, 1.0, rng, n=300, depth=depth)
         bands[b] = (t, y, dy)
     grid = density_frequency_grid(bands["g"][0], 1.0, 4.0, RHO)
-    for fn in (multiband_eebls, multiband_eebls_fast, multiband_sparse_bls):
-        sub = grid[:: 16 if fn is multiband_sparse_bls else 1]
-        res = density_bls(fn, bands, frequencies=sub, density_range=RHO)
-        assert res.best_period == pytest.approx(2.1, rel=5e-3), fn.__name__
+    cfg = SearchConfig(density_prior=_prior())
+    for method, stride in (("binned", 1), ("fast", 1), ("sparse", 16)):
+        res = bls(bands, grid[::stride], method=method, backend="cpu", config=cfg)
+        assert res.best_period == pytest.approx(2.1, rel=5e-3), method
         assert res.bands == ("g", "r")
         assert np.asarray(res.best_depth).shape == (2,)
 
 
 def test_rho_sun_constant():
     assert pytest.approx(1.41) == RHO_SUN
-
-
-def _flat_lc(n=200, baseline=60.0, seed=0):
-    rng = np.random.default_rng(seed)
-    t = np.sort(rng.uniform(0.0, baseline, n))
-    return t, np.ones(n) + rng.normal(0.0, 0.01, n) * 0.0, np.full(n, 0.01)
-
-
-def test_segment_ends_when_lower_bound_grows_even_if_upper_is_capped():
-    # q_hi is pinned at q_cap for both, but q_lo differs ~7x: must not share a segment
-    rec = _Recorder()
-    f = np.array([2.0, 20.0])
-    density_bls(rec, 0.0, frequencies=f, density_range=(0.2, 5.0), q_step=1.25)
-    assert len(rec.calls) == 2
-    for c in rec.calls:
-        lo, hi = density_duration_bounds(c["f"], (0.2, 5.0))
-        assert c["q_min"] == pytest.approx(lo.min()) and c["q_max"] >= hi.max() * (1 - 1e-12)
-
-
-def test_unrepresentable_width_range_is_widened_not_dropped():
-    # rho_min == rho_max and eta_lo == eta_hi at 1/day: q ~ 0.0764, 65 bins -> no integer
-    # width fits. Each backend must still search, consistently.
-    rng = np.random.default_rng(5)
-    t, y, dy, _ = _transit(1.0, 1.0, rng, n=300, baseline=40.0)
-    f = np.array([1.0])
-    res = {}
-    for fn in (eebls, eebls_fast):
-        res[fn.__name__] = density_bls(fn, t, y, dy, frequencies=f, density_range=(1.0, 1.0),
-                                       duration_range=(1.0, 1.0))
-    assert res["eebls"].power[0] > 0.0
-    assert res["eebls_fast"].power[0] > 0.0
-
-
-def test_n_bands_used_none_if_any_segment_lacks_counts():
-    class Mixed:
-        def __init__(self) -> None:
-            self.n = 0
-
-        def __call__(self, frequencies, q_min, q_max):
-            self.n += 1
-            counts = np.full(frequencies.size, 3, dtype=np.int64) if self.n == 1 else None
-            return BLSResult(frequency=frequencies, power=np.ones(frequencies.size),
-                             best_frequency=float(frequencies[0]), best_period=1.0,
-                             best_t0=0.0, best_duration=0.1, best_depth=0.0, best_power=1.0,
-                             n_bands_used=counts)
-
-    res = density_bls(Mixed(), frequencies=np.array([0.1, 20.0]), density_range=RHO)
-    assert res.n_bands_used is None
-
-    class AllCounts(Mixed):
-        def __call__(self, frequencies, q_min, q_max):
-            r = super().__call__(frequencies, q_min, q_max)
-            return BLSResult(**{**r.__dict__, "n_bands_used": np.full(frequencies.size, 2)})
-
-    res2 = density_bls(AllCounts(), frequencies=np.array([20.0, 0.1]), density_range=RHO)
-    np.testing.assert_array_equal(res2.n_bands_used, [2, 2])
-
-
-def test_no_detection_reports_callers_first_frequency():
-    t, y, dy = _flat_lc()
-    res = density_bls(eebls, t, y, dy, frequencies=np.array([20.0, 2.0]), density_range=RHO)
-    assert np.all(res.power == 0.0)
-    assert res.best_power == 0.0
-    assert res.best_frequency == 20.0
-    assert res.best_period == pytest.approx(1.0 / 20.0)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["BLSResult"]
+__all__ = ["BLSResult", "SegmentRecord"]
 
 from dataclasses import dataclass
 
@@ -10,6 +10,23 @@ import numpy as np
 import numpy.typing as npt
 
 Array = npt.NDArray[np.float64]
+
+
+@dataclass(frozen=True)
+class SegmentRecord:
+    """One searched frequency segment: its range, size and duration/bin settings.
+
+    ``q_min``/``q_max`` are the duty-cycle limits the segment was *searched* with (for a
+    density search these may be widened slightly so that a whole number of bins fits).
+    ``nbins`` is ``None`` for the unbinned sparse search.
+    """
+
+    f_min: float
+    f_max: float
+    n_freqs: int
+    q_min: float
+    q_max: float
+    nbins: int | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +77,13 @@ class BLSResult:
         matched-filter band weights are off; see the ``rescale_errors`` option.
         But the flat-model chi^2 includes any real variability, so bands with
         deep eclipses can read far above 1 even with correct uncertainties.
+    method, backend:
+        Which search produced the result (e.g. ``"binned"`` / ``"cpu"``), or ``None`` for
+        results built by hand.
+    segments:
+        One :class:`SegmentRecord` per searched frequency segment (a single record for a
+        fixed-``q`` search), or ``None``. This is a compact record of the widths actually
+        searched; per-frequency bounds can be derived from it.
     """
 
     frequency: Array
@@ -73,6 +97,18 @@ class BLSResult:
     bands: tuple[str, ...] | None = None
     n_bands_used: npt.NDArray[np.int64] | None = None
     band_chi2_red: Array | None = None
+    method: str | None = None
+    backend: str | None = None
+    segments: tuple[SegmentRecord, ...] | None = None
+
+    @property
+    def has_solution(self) -> bool:
+        """True if a window with positive power was found (``best_power > 0``).
+
+        This says nothing about statistical significance. When it is False the ``best_*``
+        fields refer to the first trial frequency and should not be used.
+        """
+        return bool(self.best_power > 0.0)
 
     @property
     def period(self) -> Array:

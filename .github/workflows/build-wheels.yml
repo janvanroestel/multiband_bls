@@ -47,7 +47,8 @@ jobs:
           CIBW_TEST_COMMAND: >-
             python -c "import multiband_bls as m, multiband_bls.api as api;
             from multiband_bls import _sbls, _msbls, _eebls, _meebls, _fast;
-            assert m.sparse_bls is api.sparse_bls and m.multiband_eebls is api.multiband_eebls"
+            assert m.sparse_bls is api.sparse_bls and m.multiband_eebls is api.multiband_eebls;
+            import multiband_bls.gpu as g; assert 'extern' in g._SINGLE_SRC"
             && pytest {project}/tests -k "not gpu" -o addopts="-ra --strict-markers"
 
       - name: Upload wheels as artifacts
@@ -95,7 +96,7 @@ jobs:
           cd "$RUNNER_TEMP"
           # The package falls back to the pure-Python references if the compiled
           # cores fail to import; require the compiled ones explicitly.
-          python -c "import multiband_bls as m, multiband_bls.api as api; from multiband_bls import _sbls, _msbls, _eebls, _meebls, _fast; assert m.sparse_bls is api.sparse_bls and m.multiband_eebls is api.multiband_eebls"
+          python -c "import multiband_bls as m, multiband_bls.api as api; from multiband_bls import _sbls, _msbls, _eebls, _meebls, _fast; assert m.sparse_bls is api.sparse_bls and m.multiband_eebls is api.multiband_eebls; import multiband_bls.gpu as g; assert 'extern' in g._SINGLE_SRC"
           python -c "import multiband_bls as m, numpy as np; t = np.linspace(0, 10, 200); r = m.sparse_bls(t, np.sin(t), np.ones(200), np.linspace(0.5, 2, 50)); print(r.best_period)"
 
       - name: Upload sdist as artifact
