@@ -471,3 +471,27 @@ def test_legacy_sparse_positional_order_is_unchanged():
     assert (mpos.segments[0].q_max, mpos.options.min_points) == (0.1, 4)
     with pytest.raises(TypeError):
         mb.sparse_bls(*S, F, 0.1, 3, "both", 0.02)  # q_min cannot be positional
+
+
+@pytest.mark.gpu
+def test_gpu_fast_survives_tiny_flux_scales():
+    """Squares of tiny residuals must not underflow in the GPU fast preparation: the same
+    light curve at a commonly rescaled amplitude has the same power."""
+    if not mb.gpu_available():
+        pytest.skip("no GPU")
+    t = np.array([0.0, 0.01, 0.02, 0.4, 0.5, 0.6])
+    y = np.array([1e-162, 1e-162, 1e-162, 0.0, 0.0, 0.0])
+    dy = np.full(6, 1e-150)
+    f = np.array([1.0])
+    scale = 1e150
+    cfg = SearchConfig(q_min=0.05, q_max=0.4, nbins=20, min_points=1)
+    ref = bls((t, y * scale, dy * scale), f, method="fast", backend="gpu", config=cfg)
+    tiny = bls((t, y, dy), f, method="fast", backend="gpu", config=cfg)
+    assert ref.power[0] > 0.0
+    np.testing.assert_allclose(tiny.power, ref.power, rtol=1e-4)
+    bands = {"a": (t, y, dy), "b": (t + 0.003, y, dy)}
+    bref = {k: (v[0], v[1] * scale, v[2] * scale) for k, v in bands.items()}
+    mt = bls(bands, f, method="fast", backend="gpu", config=cfg)
+    mr = bls(bref, f, method="fast", backend="gpu", config=cfg)
+    assert mr.power[0] > 0.0
+    np.testing.assert_allclose(mt.power, mr.power, rtol=1e-4)

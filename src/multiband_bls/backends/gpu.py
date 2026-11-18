@@ -27,6 +27,7 @@ from .._common import (
     _log_widths,
     _merge_bands,
     _preprocess_single,
+    _scale_bands,
 )
 from .._prep import _prepare_bands
 from .._validate import _validate_light_curve
@@ -204,10 +205,12 @@ class FastGpuSingle(_GpuBase):
         # Work in units of the median uncertainty so sy**2 and the band weights stay
         # inside float32 range for any flux scale; the power is scale-invariant.
         f_scale = _flux_scale([dy])
-        # one preprocessing pass: dividing y and dy by f_scale scales x_tilde and wx by
-        # 1/f_scale, leaves the normalised weights alone and yy by 1/f_scale**2
-        wx_h, w_h, yy_h = _preprocess_single(y, dy)
-        wx, w_hat, yy = wx_h / f_scale, w_h, yy_h / f_scale ** 2
+        # One preprocessing pass, in scaled units (squares of tiny/huge residuals must not
+        # under/overflow); the unscaled values for the host refit follow by multiplication:
+        # y, dy -> y/s, dy/s scales x_tilde and wx by 1/s and leaves the weights alone.
+        wx, w_hat, yy = _preprocess_single(np.asarray(y, dtype=np.float64) / f_scale,
+                                           np.asarray(dy, dtype=np.float64) / f_scale)
+        wx_h, w_h = wx * f_scale, w_hat
         # Subtract the median so large JD values keep full precision in the two-float split.
         t_offset = float(np.median(t))
         t_hi, t_lo = _k._split_time(np.asarray(t, dtype=np.float64) - t_offset)
@@ -283,11 +286,13 @@ class FastGpuMulti(_GpuBase):
         # Median-uncertainty units keep sy**2 and the band weights inside float32 range
         # for any flux scale (the power is scale-invariant); the refit uses unscaled bands.
         f_scale = _flux_scale([b[2] for b in bands.values()])
-        # one merge of the unscaled bands (also used by the exact refit); the scaled
-        # device arrays follow exactly: y, dy -> y/s, dy/s scales wx by 1/s and the band
-        # weights by s**2, leaves the normalised weights alone, and chi2_flat is invariant
-        t_all, wx_h, w_h, band_all, labels, w_tot_h, chi2_flat = _merge_bands(bands)
-        wx_all, w_all, w_totals = wx_h / f_scale, w_h, w_tot_h * f_scale ** 2
+        # One merge, of the scaled bands (as the kernels use them; squares of tiny/huge
+        # residuals must not under/overflow). The unscaled arrays for the exact refit
+        # follow by multiplication: y, dy -> y/s, dy/s scales wx by 1/s and the band
+        # weights by s**2, and leaves the normalised weights and chi2_flat alone.
+        t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(
+            _scale_bands(bands, f_scale))
+        wx_h, w_h, w_tot_h = wx_all * f_scale, w_all, w_totals / f_scale ** 2
         n_bands = len(labels)
         if n_bands > _k._MAX_BANDS:
             raise CapabilityError(f"GPU multiband kernel supports up to {_k._MAX_BANDS} bands")
