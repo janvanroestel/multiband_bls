@@ -37,6 +37,7 @@ try:
     __version__ = version("multiband_bls")
 except PackageNotFoundError:  # pragma: no cover - source tree without install
     __version__ = "0.0.0"
+from .density import density_bls, density_duration_bounds, density_frequency_grid
 from .reference import (
     build_frequency_grid,
     coadd_bands,
@@ -123,5 +124,8 @@ __all__ = [
     "multiband_sparse_bls_reference",
     "multiband_eebls_reference",
     "build_frequency_grid",
+    "density_bls",
+    "density_duration_bounds",
+    "density_frequency_grid",
     "coadd_bands",
 ]

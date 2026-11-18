@@ -4,6 +4,17 @@
 
 ### Added
 
+- Density-based search (`density_bls`, `density_duration_bounds`,
+  `density_frequency_grid`). A transit lasts `q = T/P ∝ P^(-2/3)` for a given stellar
+  density, so a fixed `(q_min, q_max)` tests widths no real transit can have.
+  `density_bls(search, *data, frequencies=..., density_range=(rho_min, rho_max))` wraps
+  any search function (binned, fast, sparse, multiband, GPU), cuts the grid into
+  segments of slowly varying duty cycle and runs each with its own `q_min`, `q_max` and
+  `nbins`. `density_frequency_grid` builds a grid whose step follows the minimum
+  duration (uniform in `f^(1/3)`): 9-70x fewer points than a uniform grid resolving the
+  same narrowest box for 3-year baselines and period ranges of 0.1-10 d to 30 s-1 d.
+  `power` is maximised over a different width range in each segment, so its noise
+  floor drifts slowly with frequency.
 - `eebls_fast` and `multiband_eebls_fast`: CPU counterparts of the `*_gpu_fast`
   entry points (prefix-sum phase bins, log-spaced widths via `dlogq`) in a new
   Cython core `_fast.pyx`, in double precision. The frequency loop runs without the
