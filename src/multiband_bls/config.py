@@ -13,6 +13,7 @@ import numpy as np
 import numpy.typing as npt
 
 from ._prep import auto_nbins
+from ._validate import _check_fraction
 from .density import density_duration_bounds, density_frequency_grid
 from .engine import SegmentSpec
 
@@ -149,8 +150,9 @@ class SearchConfig:
 
     def resolve_q(self, method: str) -> tuple[float, float]:
         """``(q_min, q_max)`` with the per-method defaults filled in."""
-        q_min = 0.01 if self.q_min is None else float(self.q_min)
+        # explicit bounds go through the same numeric-type check as the legacy functions
+        q_min = 0.01 if self.q_min is None else _check_fraction("q_min", self.q_min)
         q_max = (0.15 if method == "sparse" else 0.10) if self.q_max is None \
-            else float(self.q_max)
+            else _check_fraction("q_max", self.q_max)
         return q_min, q_max
 

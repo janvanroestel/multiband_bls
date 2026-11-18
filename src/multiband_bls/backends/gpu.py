@@ -205,18 +205,18 @@ class FastGpuSingle(_GpuBase):
         # Work in units of the median uncertainty so sy**2 and the band weights stay
         # inside float32 range for any flux scale; the power is scale-invariant.
         f_scale = _flux_scale([dy])
-        # One preprocessing pass, in scaled units (squares of tiny/huge residuals must not
-        # under/overflow); the unscaled values for the host refit follow by multiplication:
-        # y, dy -> y/s, dy/s scales x_tilde and wx by 1/s and leaves the weights alone.
+        # Preprocess in scaled units (squares of tiny/huge residuals must not under/overflow).
+        # The exact host refit needs the *original-unit* preprocessing (mean subtraction on
+        # a large baseline loses precision when done on scaled values), so it is done
+        # lazily in refine(), once per search, as the legacy refit did.
         wx, w_hat, yy = _preprocess_single(np.asarray(y, dtype=np.float64) / f_scale,
                                            np.asarray(dy, dtype=np.float64) / f_scale)
-        wx_h, w_h = wx * f_scale, w_hat
         # Subtract the median so large JD values keep full precision in the two-float split.
         t_offset = float(np.median(t))
         t_hi, t_lo = _k._split_time(np.asarray(t, dtype=np.float64) - t_offset)
         prep = _GpuPrep(yy)
         prep.host.update(t_raw=t, t_offset=t_offset, t_c=np.asarray(t, dtype=np.float64)
-                         - t_offset, wx=wx_h, w_hat=w_h)
+                         - t_offset, y=y, dy=dy)
         prep.dev.update(thi=cp.asarray(t_hi, dtype=cp.float32),
                         tlo=cp.asarray(t_lo, dtype=cp.float32),
                         wx=cp.asarray(wx, dtype=cp.float32),
@@ -267,6 +267,8 @@ class FastGpuSingle(_GpuBase):
 
     def refine(self, prep: Any, freq: float, spec: SegmentSpec, opts: RunOptions) -> BestFit:
         h = prep.host
+        if "wx" not in h:  # original units, once per search (the first, only refit)
+            h["wx"], h["w_hat"], _ = _preprocess_single(h["y"], h["dy"])
         _, _, t0, dur, depth, sr = _eebls.eebls_grid(
             np.ascontiguousarray(h["t_c"]), h["wx"], h["w_hat"], np.array([freq]),
             spec.nbins, float(spec.q_min), float(spec.q_max), opts.min_points, opts.sign)
@@ -286,13 +288,11 @@ class FastGpuMulti(_GpuBase):
         # Median-uncertainty units keep sy**2 and the band weights inside float32 range
         # for any flux scale (the power is scale-invariant); the refit uses unscaled bands.
         f_scale = _flux_scale([b[2] for b in bands.values()])
-        # One merge, of the scaled bands (as the kernels use them; squares of tiny/huge
-        # residuals must not under/overflow). The unscaled arrays for the exact refit
-        # follow by multiplication: y, dy -> y/s, dy/s scales wx by 1/s and the band
-        # weights by s**2, and leaves the normalised weights and chi2_flat alone.
+        # Merge the scaled bands (as the kernels use them; squares of tiny/huge residuals
+        # must not under/overflow). The exact host refit needs the original-unit merge, done
+        # lazily in refine(), once per search, as the legacy refit did.
         t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(
             _scale_bands(bands, f_scale))
-        wx_h, w_h, w_tot_h = wx_all * f_scale, w_all, w_totals / f_scale ** 2
         n_bands = len(labels)
         if n_bands > _k._MAX_BANDS:
             raise CapabilityError(f"GPU multiband kernel supports up to {_k._MAX_BANDS} bands")
@@ -305,8 +305,7 @@ class FastGpuMulti(_GpuBase):
         t_hi, t_lo = _k._split_time(t_all - t_offset)
         prep = _GpuPrep(chi2_flat, labels, chi2_red)
         prep.n_bands = n_bands  # type: ignore[attr-defined]
-        prep.host.update(t_raw=t_all, t_offset=t_offset, t_c=t_all - t_offset, wx=wx_h, w=w_h,
-                         band=band_all, band_w=w_tot_h)
+        prep.host.update(t_raw=t_all, t_offset=t_offset, t_c=t_all - t_offset, bands=bands)
         prep.dev.update(thi=cp.asarray(t_hi, dtype=cp.float32),
                         tlo=cp.asarray(t_lo, dtype=cp.float32),
                         wx=cp.asarray(wx_all, dtype=cp.float32),
@@ -374,6 +373,8 @@ class FastGpuMulti(_GpuBase):
 
     def refine(self, prep: Any, freq: float, spec: SegmentSpec, opts: RunOptions) -> BestFit:
         h = prep.host
+        if "wx" not in h:  # original units, once per search (the first, only refit)
+            _, h["wx"], h["w"], h["band"], _, h["band_w"], _ = _merge_bands(h["bands"])
         _, _, t0, dur, depths, sr, _ = _meebls.meebls_grid(
             np.ascontiguousarray(h["t_c"]), h["wx"], h["w"], h["band"], prep.n_bands,
             np.array([freq]), spec.nbins, float(spec.q_min), float(spec.q_max),

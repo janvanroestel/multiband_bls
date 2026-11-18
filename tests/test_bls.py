@@ -389,10 +389,16 @@ def test_gpu_multi_segment_search_preprocesses_once(monkeypatch):
     f = np.geomspace(0.5, 20.0, 600)
     res = bls(B, f, method="fast", backend="gpu", config=cfg)
     assert len(res.segments) > 5
-    assert counts == {"merge": 1, "single": 0, "prepare": 1}
+    # one scaled merge in prepare + one original-unit merge in the single refit: independent
+    # of the number of segments
+    assert counts == {"merge": 2, "single": 0, "prepare": 1}
+    counts.update(merge=0, single=0, prepare=0)
+    one = bls(B, f, method="fast", backend="gpu")  # a single-segment search
+    assert len(one.segments) == 1
+    assert counts == {"merge": 2, "single": 0, "prepare": 1}
     counts.update(merge=0, single=0, prepare=0)
     bls(S, f, method="fast", backend="gpu", config=cfg)
-    assert counts["single"] == 1 and counts["merge"] == 0
+    assert counts["single"] == 2 and counts["merge"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -495,3 +501,35 @@ def test_gpu_fast_survives_tiny_flux_scales():
     mr = bls(bref, f, method="fast", backend="gpu", config=cfg)
     assert mr.power[0] > 0.0
     np.testing.assert_allclose(mt.power, mr.power, rtol=1e-4)
+
+
+@pytest.mark.gpu
+def test_gpu_fast_refit_uses_original_unit_preprocessing():
+    """A large baseline with a small variation: the refit depth must match the CPU's."""
+    if not mb.gpu_available():
+        pytest.skip("no GPU")
+    t = np.array([0.0, 0.5])
+    y = np.array([2.0 ** 53, 2.0 ** 53 + 4.0])
+    dy = np.full(2, 10.0)
+    f = np.array([1.0])
+    cfg = SearchConfig(nbins=4, q_min=0.25, q_max=0.25, min_points=1, sign="positive")
+    cpu = bls((t, y, dy), f, method="binned", backend="cpu", config=cfg)
+    gpu = bls((t, y, dy), f, method="fast", backend="gpu", config=cfg)
+    assert cpu.best_depth == 4.0
+    assert gpu.best_depth == cpu.best_depth
+    bands = {"a": (t, y, dy), "b": (t + 0.1, y, dy)}
+    # the fast searches fold median-centred times, so compare with the CPU fast search
+    cpu_m = bls(bands, f, method="fast", backend="cpu", config=cfg)
+    gpu_m = bls(bands, f, method="fast", backend="gpu", config=cfg)
+    np.testing.assert_array_equal(gpu_m.best_depth, cpu_m.best_depth)
+    assert gpu_m.best_depth[0] == 4.0
+
+
+@pytest.mark.parametrize("bad", ["0.02", True, [0.02]])
+def test_config_bounds_use_the_shared_numeric_validation(bad):
+    with pytest.raises(ValueError, match="q_min"):
+        bls(S, F, method="binned", backend="cpu", config=SearchConfig(q_min=bad))
+    with pytest.raises(ValueError, match="q_max"):
+        bls(S, F, method="binned", backend="cpu", config=SearchConfig(q_max=bad))
+    with pytest.raises(ValueError, match="q_min"):
+        mb.eebls(*S, F, q_min=bad)  # the legacy wrapper rejects the same values
