@@ -26,6 +26,13 @@
   a `widened` flag), `.options` (resolved search options and any automatic CPU fallback),
   `.evaluated` (coarse searches: which frequencies are real evaluations), `.q_bounds()` and
   `.has_solution` (`best_power > 0`).
+- Fixed: a coarse-to-fine search could report an interpolated (never evaluated) frequency
+  as the best solution when interpolation created a plateau, so `best_power` did not match
+  the power at `best_frequency`; only evaluated frequencies are candidates now (and
+  `best_*` fall back to the first trial frequency when nothing scores above zero).
+- Fixed: the CPU binned searches (`eebls`, `multiband_eebls`) returned all-zero power
+  when `[q_min, q_max]` contains no whole number of bins; every backend now raises
+  `ValueError`, as the fast and GPU searches already did.
 - A segment search preprocesses and merges the data once and does one exact best-fit refit
   at the global peak; previously each refinement re-validated and re-preprocessed.
 
@@ -54,7 +61,8 @@
   `multiband_eebls_gpu_fast` when the coarse search skips frequencies (grids shorter
   than `4 * coarse_factor` are evaluated in full and keep it).
 - `sparse_bls` and `multiband_sparse_bls` (and their reference versions) take `q_min`
-  (default 0.01) and `sign`, matching the binned entry points. The binned reference
+  (default 0.01, **keyword-only** so the positional order `frequencies, q_max, min_points`
+  of earlier releases is unchanged) and `sign`, matching the binned entry points. The binned reference
   searches (`eebls_reference`, `multiband_eebls_reference`) also take `sign`, so the
   pure-Python fallback accepts every documented argument.
 

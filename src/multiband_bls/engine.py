@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from ._prep import variance_explained
+from ._prep import variance_explained, width_bounds
 from .result import BLSResult, SearchOptions, SegmentRecord
 
 Array = npt.NDArray[np.float64]
@@ -141,6 +141,9 @@ def execute(
     caller-level options (requested backend, fallback reason, ``rescale_errors``) into
     :attr:`BLSResult.options`.
     """
+    for _, spec in segments:
+        if spec.nbins is not None:  # every binned backend rejects a range with no whole width
+            width_bounds(spec.nbins, spec.q_min, spec.q_max)
     impl.check_frequencies(prep, freqs, opts)
     nf = freqs.shape[0]
     single = len(segments) == 1 and isinstance(segments[0][0], slice)
@@ -200,7 +203,12 @@ def execute(
         freq, depth = best.frequency, best.depth
         t0, dur = best.t0, best.duration
     else:
-        idx = int(np.argmax(power))
+        # interpolated (unevaluated) power is a fill-in, never a candidate; with nothing
+        # positive anywhere the best_* fields refer to the caller's first frequency
+        candidates = power if evaluated is None else np.where(evaluated, power, -np.inf)
+        idx = int(np.argmax(candidates))
+        if candidates[idx] <= 0.0:
+            idx = 0
         freq = float(freqs[idx])
         spec = segments[_segment_of(segments, idx)][1]
         fit = impl.refine(prep, freq, spec, opts)

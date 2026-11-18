@@ -393,3 +393,81 @@ def test_gpu_multi_segment_search_preprocesses_once(monkeypatch):
     counts.update(merge=0, single=0, prepare=0)
     bls(S, f, method="fast", backend="gpu", config=cfg)
     assert counts["single"] == 1 and counts["merge"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# third review: interpolated winners, unrepresentable widths, sparse signatures #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("order", ["descending", "shuffled", "ascending"])
+def test_coarse_search_never_selects_an_interpolated_frequency(order):
+    cfg = SearchConfig(nbins=20, q_min=0.05, q_max=0.2, min_points=1)
+    checked = 0
+    for seed in range(60):
+        rng = np.random.default_rng(seed)
+        t = np.sort(rng.uniform(0.0, 1.0, 6))
+        y, dy = rng.normal(size=6), np.ones(6)
+        f = np.linspace(0.1, 2.0, 100)
+        if order == "descending":
+            f = f[::-1].copy()
+        elif order == "shuffled":
+            f = rng.permutation(f)
+        res = bls((t, y, dy), f, method="fast", backend="cpu", config=cfg,
+                  coarse_factor=4, n_refine=1)
+        if res.evaluated is None:
+            continue
+        i = int(np.flatnonzero(res.frequency == res.best_frequency)[0])
+        if res.best_power > 0:
+            checked += 1
+            assert res.evaluated[i], f"seed {seed}: interpolated frequency chosen"
+            assert res.best_power == res.power[i]
+            exact = bls((t, y, dy), np.array([res.best_frequency]), method="fast",
+                        backend="cpu", config=cfg)
+            assert exact.power[0] == pytest.approx(res.best_power, rel=1e-9)
+        else:  # nothing passed anywhere: the caller's first frequency
+            assert res.best_frequency == f[0]
+    assert checked > 20
+
+
+@pytest.mark.parametrize("method", ["binned", "fast"])
+def test_unrepresentable_width_range_is_rejected_everywhere(method):
+    cfg = SearchConfig(nbins=10, q_min=0.011, q_max=0.019)  # no whole bin fits
+    with pytest.raises(ValueError, match="no window width"):
+        bls(S, F, method=method, backend="cpu", config=cfg)
+    with pytest.raises(ValueError, match="no window width"):
+        bls(B, F, method=method, backend="cpu", config=cfg)
+    if mb.gpu_available():
+        with pytest.raises(ValueError, match="no window width"):
+            bls(B, F, method=method, backend="gpu", config=cfg)
+    kw = {"nbins": 10, "q_min": 0.011, "q_max": 0.019}
+    legacy = {"binned": (mb.eebls, mb.multiband_eebls),
+              "fast": (mb.eebls_fast, mb.multiband_eebls_fast)}[method]
+    with pytest.raises(ValueError, match="no window width"):
+        legacy[0](*S, F, **kw)
+    with pytest.raises(ValueError, match="no window width"):
+        legacy[1](B, F, **kw)
+    if method == "binned":
+        with pytest.raises(ValueError, match="no window width"):
+            mb.eebls_reference(*S, F, **kw)
+        with pytest.raises(ValueError, match="no window width"):
+            mb.multiband_eebls_reference(B, F, **kw)
+
+
+def test_legacy_sparse_positional_order_is_unchanged():
+    import inspect
+
+    for fn in (mb.sparse_bls, mb.multiband_sparse_bls, mb.sparse_bls_reference,
+               mb.multiband_sparse_bls_reference):
+        params = inspect.signature(fn).parameters
+        assert params["q_min"].kind is inspect.Parameter.KEYWORD_ONLY, fn.__name__
+        positional = [n for n, p in params.items()
+                      if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD]
+        # data, frequencies, then the arguments that existed before q_min was added
+        assert positional[positional.index("frequencies") + 1:][:2] == ["q_max", "min_points"]
+    # the fifth positional argument is q_max, as it always was
+    pos = mb.sparse_bls(*S, F, 0.1)
+    assert pos.segments[0].q_max == 0.1 and pos.segments[0].q_min == 0.01
+    np.testing.assert_array_equal(pos.power, mb.sparse_bls(*S, F, q_max=0.1).power)
+    mpos = mb.multiband_sparse_bls(B, F, 0.1, 4)
+    assert (mpos.segments[0].q_max, mpos.options.min_points) == (0.1, 4)
+    with pytest.raises(TypeError):
+        mb.sparse_bls(*S, F, 0.1, 3, "both", 0.02)  # q_min cannot be positional

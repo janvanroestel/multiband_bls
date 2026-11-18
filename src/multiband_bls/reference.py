@@ -173,10 +173,11 @@ def sparse_bls_reference(
     y: Array,
     dy: Array,
     frequencies: Array,
-    q_min: float = 0.01,
     q_max: float = 0.15,
     min_points: int = 3,
     sign: str = "both",
+    *,
+    q_min: float = 0.01,
 ) -> BLSResult:
     """Single-band Sparse BLS (pure-Python reference).
 
@@ -341,11 +342,12 @@ def _multiband_period(
 def multiband_sparse_bls_reference(
     bands: Mapping[str, tuple[Array, Array, Array]],
     frequencies: Array,
-    q_min: float = 0.01,
     q_max: float = 0.15,
     min_points: int = 3,
     rescale_errors: bool = False,
     sign: str = "both",
+    *,
+    q_min: float = 0.01,
 ) -> BLSResult:
     """Multiband Sparse BLS (pure-Python reference).
 
