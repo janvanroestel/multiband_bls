@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-18
+
 ### Added
 
 - Fast GPU searches also refuse extreme heteroscedastic weight ranges (weighted sums outside float32); `backend="auto"` falls back to the CPU.
