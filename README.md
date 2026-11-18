@@ -173,12 +173,13 @@ A fixed `(q_min, q_max)` search (grey) covers the same widths at every period; t
 * `density_range=(rho_min, rho_max)` (solar densities) sets the *central-transit* duty
   cycle: the dashed line is the least dense host, the dotted line the densest.
 * `duration_range=(eta_lo, eta_hi)` scales that by the allowed duration relative to a
-  central transit: `q_lo` is `rho_max` times `eta_lo` (grazing, high impact parameter) and
-  `q_hi` is `rho_min` times `eta_hi` (companion radius, eccentricity).
+  central transit: `q_lo` is the densest host's central-transit duty cycle times `eta_lo`
+  (grazing, high impact parameter), `q_hi` the least dense host's times `eta_hi`
+  (companion radius, eccentricity).
 * `q_cap` bounds the duty cycles at short periods, where the transit would otherwise
   cover a large part of the orbit (and the search become expensive).
 * `q_floor` (optional, default `None`) is the matching lower limit: without it `q_lo` keeps
-  falling as `P^(-2/3)` (about 0.001 at P = 100 d), so the search resolves ever narrower
+  falling as `P^(-2/3)` (for the prior shown, about 0.001 at P = 10 d and 0.0002 at 100 d), so the search resolves ever narrower
   boxes. A floor, e.g. `q_floor=0.005`, stops that where such transits are not detectable
   and coarsens the grid accordingly; it must not exceed `q_cap`.
 * `q_step` sets how finely the grid is cut: a new segment, with its own width range and

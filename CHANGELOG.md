@@ -6,6 +6,10 @@
 
 - `DensityPrior(q_floor=...)`: optional lower limit on the duty-cycle range (default `None`, results unchanged); also accepted by `density_duration_bounds` and `density_frequency_grid`.
 
+### Fixed
+
+- Density-prior segments never widen past `q_cap` (at the cap `q_min` is lowered to the widest whole bin instead), and a collapsed range (`q_floor == q_cap`, or both bounds at the cap) no longer makes the sparse search reject every window.
+
 ## [0.2.0] — 2026-11-18
 
 ### Added

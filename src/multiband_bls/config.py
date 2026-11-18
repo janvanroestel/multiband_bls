@@ -91,7 +91,11 @@ class DensityPrior:
         For binned methods ``nbins`` defaults to ``auto_nbins`` per segment (clipped to 500,
         noted once in the log); if no whole number of bins then fits ``[q_min, q_max]``,
         ``q_max`` is widened to the nearest representable width so that every backend
-        searches the segment the same way.
+        searches the segment the same way. Widening never crosses ``q_cap``: at the cap
+        ``q_min`` is lowered to the widest whole bin below it instead (only an ``nbins``
+        too small for any width ``<= q_cap`` exceeds it). A collapsed range for the sparse
+        search (``q_min == q_max``, e.g. ``q_floor == q_cap``) gets ``q_min = q_max /
+        q_step``. Either adjustment sets ``SegmentSpec.widened``.
         """
         order = np.argsort(freqs, kind="stable")
         f_sorted = freqs[order]
@@ -127,8 +131,19 @@ class DensityPrior:
             widened = False
             if nb is not None:
                 kmi = max(1, math.ceil(q_min * nb - 1e-9))  # as reference.width_bounds
-                if kmi > math.floor(q_max * nb + 1e-9):
-                    q_max, widened = min(kmi / nb, 0.999), True
+                kma = math.floor(q_max * nb + 1e-9)
+                if kmi > kma:
+                    widened = True
+                    if kmi / nb <= self.q_cap + 1e-12:
+                        q_max = kmi / nb          # nearest whole bin above, within q_cap
+                    elif kma >= 1:
+                        q_min = kma / nb          # at the cap: widest whole bin below it
+                    else:                         # nbins too small for any width <= q_cap
+                        q_max = min(kmi / nb, 0.999)
+            elif q_min >= q_max:
+                # sparse windows are half-open [q_min, q_max): a collapsed range (q_floor
+                # == q_cap, or both bounds pinned at q_cap) would admit nothing
+                q_min, widened = q_max / self.q_step, True
             out.append((order[s:e], SegmentSpec(q_min, q_max, nb, widened)))
         return out
 

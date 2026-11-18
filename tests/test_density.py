@@ -241,3 +241,23 @@ def test_q_floor_clamps_lower_bound_and_coarsens_grid():
         with pytest.raises(ValueError, match="q_floor"):
             density_duration_bounds(f, RHO, q_floor=bad)
     assert DensityPrior(RHO).q_floor is None
+
+
+@pytest.mark.parametrize("method", ["binned", "fast", "sparse"])
+def test_collapsed_range_at_cap_is_searchable_and_respects_cap(method):
+    """q_floor == q_cap leaves a single allowed width: widening must stay <= q_cap and the
+    sparse search (half-open [q_min, q_max)) must still admit windows."""
+    prior = DensityPrior((0.2, 5.0), q_floor=0.25, q_cap=0.25)
+    freqs = np.array([0.5, 1.0, 2.0])
+    for _, spec in prior.segments(freqs, binned=method != "sparse"):
+        assert spec.q_max <= 0.25 + 1e-12 and spec.q_min < spec.q_max and spec.widened
+    # quarter-period eclipse at P = 1 d, one band and two
+    t = np.arange(0.0, 20.0, 0.01)
+    y = np.where((t % 1.0) < 0.25, 1.0, 0.0)
+    dy = np.ones_like(t)
+    for data in ((t, y, dy), {"a": (t, y, dy), "b": (t + 0.005, y, dy)}):
+        res = bls(data, freqs, method=method, backend="cpu",
+                  config=SearchConfig(density_prior=prior, min_points=1))
+        assert res.power[1] > 0.5 and res.best_period == pytest.approx(1.0)
+        for rec in res.segments:
+            assert rec.q_max <= 0.25 + 1e-12
