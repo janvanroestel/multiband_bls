@@ -220,3 +220,24 @@ def test_multiband_methods_recover_with_density_prior():
 
 def test_rho_sun_constant():
     assert pytest.approx(1.41) == RHO_SUN
+
+
+def test_q_floor_clamps_lower_bound_and_coarsens_grid():
+    f = np.array([0.01, 0.1, 1.0, 10.0])
+    free_lo, free_hi = density_duration_bounds(f, RHO)
+    lo, hi = density_duration_bounds(f, RHO, q_floor=0.01)
+    assert np.all(lo >= 0.01) and np.all(hi >= lo)
+    assert lo[0] == pytest.approx(0.01) and free_lo[0] < 0.01  # floor binds at long period
+    assert np.allclose(lo[-1], free_lo[-1])                      # and not at short period
+    prior = DensityPrior(RHO, q_floor=0.01)
+    assert np.all(prior.bounds(f)[0] >= 0.01)
+    t = np.linspace(0.0, 30.0, 200)
+    assert prior.grid(t, 0.5, 100.0).size < DensityPrior(RHO).grid(t, 0.5, 100.0).size
+    for seg in prior.segments(1.0 / np.geomspace(0.5, 100.0, 500), binned=False)[0:]:
+        assert seg[1].q_min >= 0.01
+    for bad in (0.0, -1.0, 0.3):  # <= 0 or above q_cap (0.25)
+        with pytest.raises(ValueError, match="q_floor"):
+            DensityPrior(RHO, q_floor=bad)
+        with pytest.raises(ValueError, match="q_floor"):
+            density_duration_bounds(f, RHO, q_floor=bad)
+    assert DensityPrior(RHO).q_floor is None

@@ -50,6 +50,10 @@ class DensityPrior:
         eccentricity.
     q_cap :
         Upper limit on the duty cycles (bounds the cost at very short periods).
+    q_floor :
+        Optional lower limit on the duty cycles (``None``: none). Without it ``q_lo`` keeps
+        falling as ``P^(-2/3)``; a floor stops the search resolving transits narrower than
+        you can detect, and coarsens the frequency grid at long periods accordingly.
     q_step :
         A segment ends once ``q_lo`` or ``q_hi`` has grown by this factor.
     """
@@ -58,22 +62,24 @@ class DensityPrior:
     duration_range: tuple[float, float] = (0.1, 1.5)
     q_cap: float = 0.25
     q_step: float = 1.25
+    q_floor: float | None = None
 
     def __post_init__(self) -> None:
         density_duration_bounds(np.array([1.0]), self.density_range, self.duration_range,
-                                self.q_cap)  # validates the three ranges
+                                self.q_cap, self.q_floor)  # validates the ranges
         if not self.q_step > 1.0:
             raise ValueError(f"q_step must be > 1, got {self.q_step!r}.")
 
     def bounds(self, frequency: Array | float) -> tuple[Array, Array]:
         """``(q_lo, q_hi)`` at ``frequency`` (1/day)."""
         return density_duration_bounds(frequency, self.density_range, self.duration_range,
-                                       self.q_cap)
+                                       self.q_cap, self.q_floor)
 
     def grid(self, t: Array, p_min: float, p_max: float, oversample: float = 3.0) -> Array:
         """Frequency grid whose step follows the minimum duration (uniform in f^(1/3))."""
         return density_frequency_grid(t, p_min, p_max, self.density_range,
-                                      self.duration_range, oversample, self.q_cap)
+                                      self.duration_range, oversample, self.q_cap,
+                                      self.q_floor)
 
     def segments(
         self, freqs: Array, *, binned: bool, nbins: int | None = None

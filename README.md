@@ -177,6 +177,10 @@ A fixed `(q_min, q_max)` search (grey) covers the same widths at every period; t
   `q_hi` is `rho_min` times `eta_hi` (companion radius, eccentricity).
 * `q_cap` bounds the duty cycles at short periods, where the transit would otherwise
   cover a large part of the orbit (and the search become expensive).
+* `q_floor` (optional, default `None`) is the matching lower limit: without it `q_lo` keeps
+  falling as `P^(-2/3)` (about 0.001 at P = 100 d), so the search resolves ever narrower
+  boxes. A floor, e.g. `q_floor=0.005`, stops that where such transits are not detectable
+  and coarsens the grid accordingly; it must not exceed `q_cap`.
 * `q_step` sets how finely the grid is cut: a new segment, with its own width range and
   bin count (orange), starts once `q_lo` or `q_hi` has grown by this factor.
 
@@ -258,7 +262,7 @@ binned functions.
 | `bls(data, frequencies, method=, backend=, config=)` | `multiband_bls` | any search, one or several bands, CPU or GPU |
 | `bls_prepare(data, method=, backend=)` | `multiband_bls` | validate/weight/upload once for repeated `bls` calls |
 | `SearchConfig(q_min, q_max, nbins, min_points, sign, density_prior)` | `multiband_bls` | search settings shared by grid and search |
-| `DensityPrior(density_range, duration_range, q_cap, q_step)` | `multiband_bls` | period-dependent duration range and grid from a stellar-density range |
+| `DensityPrior(density_range, duration_range, q_cap, q_step, q_floor)` | `multiband_bls` | period-dependent duration range and grid from a stellar-density range |
 
 ### Helpers
 

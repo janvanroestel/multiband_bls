@@ -53,6 +53,7 @@ def _check_ranges(
     density_range: tuple[float, float],
     duration_range: tuple[float, float],
     q_cap: float,
+    q_floor: float | None = None,
 ) -> tuple[float, float, float, float, float]:
     rho_lo, rho_hi = (float(x) for x in density_range)
     eta_lo, eta_hi = (float(x) for x in duration_range)
@@ -63,6 +64,8 @@ def _check_ranges(
     q_cap = float(q_cap)
     if not 0.0 < q_cap < 1.0:
         raise ValueError(f"q_cap must be in (0, 1), got {q_cap!r}.")
+    if q_floor is not None and not 0.0 < float(q_floor) <= q_cap:
+        raise ValueError(f"q_floor must be in (0, q_cap={q_cap!r}], got {q_floor!r}.")
     return rho_lo, rho_hi, eta_lo, eta_hi, q_cap
 
 
@@ -71,6 +74,7 @@ def density_duration_bounds(
     density_range: tuple[float, float],
     duration_range: tuple[float, float] = (0.1, 1.5),
     q_cap: float = 0.25,
+    q_floor: float | None = None,
 ) -> tuple[Array, Array]:
     """Allowed duty-cycle range ``(q_lo, q_hi)`` at each ``frequency`` (1/day).
 
@@ -87,10 +91,17 @@ def density_duration_bounds(
     q_cap :
         Upper limit on ``q_hi`` (and ``q_lo``), which keeps the box widths -- and the
         cost of the search -- bounded at very short periods.
+    q_floor :
+        Optional lower limit on ``q_lo`` (and ``q_hi``), e.g. the narrowest transit worth
+        resolving at long periods; ``None`` (default) leaves ``q_lo`` falling as
+        ``P^(-2/3)``. Must satisfy ``0 < q_floor <= q_cap``.
     """
-    rho_lo, rho_hi, eta_lo, eta_hi, q_cap = _check_ranges(density_range, duration_range, q_cap)
+    rho_lo, rho_hi, eta_lo, eta_hi, q_cap = _check_ranges(
+        density_range, duration_range, q_cap, q_floor)
     q_lo = np.minimum(eta_lo * central_duration_fraction(frequency, rho_hi), q_cap)
     q_hi = np.minimum(eta_hi * central_duration_fraction(frequency, rho_lo), q_cap)
+    if q_floor is not None:
+        q_lo, q_hi = np.maximum(q_lo, q_floor), np.maximum(q_hi, q_floor)
     return q_lo, q_hi
 
 
@@ -102,6 +113,7 @@ def density_frequency_grid(
     duration_range: tuple[float, float] = (0.1, 1.5),
     oversample: float = 3.0,
     q_cap: float = 0.25,
+    q_floor: float | None = None,
 ) -> Array:
     """Frequency grid (1/day) whose step follows the minimum duration at each period.
 
@@ -125,7 +137,8 @@ def density_frequency_grid(
     # Number of grid points below f: N(f) = oversample * baseline * integral df / q_lo.
     log_f = np.linspace(math.log(f_min), math.log(f_max), 8192)
     f_nodes = np.exp(log_f)
-    q_lo, _ = density_duration_bounds(f_nodes, density_range, duration_range, q_cap)
+    q_lo, _ = density_duration_bounds(f_nodes, density_range, duration_range, q_cap,
+                                      q_floor)
     integrand = f_nodes / q_lo  # d(log f) measure
     cum = np.concatenate(
         ([0.0], np.cumsum(0.5 * (integrand[1:] + integrand[:-1]) * np.diff(log_f)))

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `DensityPrior(q_floor=...)`: optional lower limit on the duty-cycle range (default `None`, results unchanged); also accepted by `density_duration_bounds` and `density_frequency_grid`.
+
 ## [0.2.0] — 2026-11-18
 
 ### Added
