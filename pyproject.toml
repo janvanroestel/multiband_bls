@@ -78,6 +78,7 @@ module = [
     "cupy.*",
     "Cython.*",
     "multiband_bls._eebls",
+    "multiband_bls._fast",
     "multiband_bls._meebls",
     "multiband_bls._msbls",
     "multiband_bls._sbls",

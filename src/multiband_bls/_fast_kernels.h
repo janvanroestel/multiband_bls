@@ -128,11 +128,13 @@ static int mbls_single_gate(const double *restrict cc, int i0, int i1, int off,
     return m;
 }
 
-/* Max of sy^2 / (sr (1 - sr)) over the listed starts (sr (1 - sr) > 0 only). */
+/* Max of sy^2 / (sr (1 - sr)) over the listed starts (sr (1 - sr) > 0 only).
+ * sg in {-1, 0, +1} restricts the sign of sy (0: both); a window whose sy has the
+ * wrong sign scores 0. sg * sy >= 0 is branch-free and vectorises. */
 MBLS_CLONES
 static double mbls_single_eval(const double *restrict cy, const double *restrict cr,
                                const int *restrict idx, int m, int off,
-                               double addy, double addr)
+                               double addy, double addr, double sg)
 {
     double best = 0.0;
     for (int j = 0; j < m; j++) {
@@ -141,7 +143,7 @@ static double mbls_single_eval(const double *restrict cy, const double *restrict
         const double sr = cr[i + off] + addr - cr[i];
         const double denom = sr * (1.0 - sr);
         const double v = sy * sy / (denom > 0.0 ? denom : 1.0);
-        const double g = denom > 0.0 ? v : 0.0;
+        const double g = (denom > 0.0) & (sg * sy >= 0.0) ? v : 0.0;
         best = g > best ? g : best;
     }
     return best;
@@ -150,7 +152,7 @@ static double mbls_single_eval(const double *restrict cy, const double *restrict
 /* Whole sweep of one frequency's prepared bins over all widths. */
 static double mbls_sweep_single(const double *cy, const double *cr, const double *cc,
                                 int nb, const int *widths, int nw, double mp,
-                                double nmax, int *idx)
+                                double nmax, int *idx, double sg)
 {
     double best = 0.0;
     for (int wi = 0; wi < nw; wi++) {
@@ -163,7 +165,7 @@ static double mbls_sweep_single(const double *cy, const double *cr, const double
                                            nmax, idx);
             if (m == 0) continue;
             const double v = mbls_single_eval(cy, cr, idx, m, off, part ? cy[nb] : 0.0,
-                                              part ? cr[nb] : 0.0);
+                                              part ? cr[nb] : 0.0, sg);
             best = v > best ? v : best;
         }
     }
@@ -187,13 +189,14 @@ static int mbls_multi_gate(const double *restrict ct, int i0, int i1, int off,
 }
 
 /* max over listed starts of sum_b W_b sy^2 / (sr (1 - sr)), a band counting only
- * with 1 <= count < band_n and sr (1 - sr) > 0. acc is scratch of length >= m. */
+ * with 1 <= count < band_n, sr (1 - sr) > 0 and sg * sy >= 0 (per-band sign cut). acc is scratch of length >= m. */
 MBLS_CLONES
 static double mbls_multi_eval(const double *restrict cy, const double *restrict cr,
                               const double *restrict cc, int n_bands, int nb,
                               const int *restrict idx, int m, int off, int wrap,
                               const double *restrict band_w,
-                              const double *restrict band_n, double *restrict acc)
+                              const double *restrict band_n, double *restrict acc,
+                              double sg)
 {
     const long L = nb + 1;
     for (int j = 0; j < m; j++) acc[j] = 0.0;
@@ -209,7 +212,7 @@ static double mbls_multi_eval(const double *restrict cy, const double *restrict 
             const double sr = r[i + off] + ar - r[i];
             const double denom = sr * (1.0 - sr);
             const double v = bw * sy * sy / (denom > 0.0 ? denom : 1.0);
-            acc[j] += ((sc >= 1.0) & (sc < bn) & (denom > 0.0)) ? v : 0.0;
+            acc[j] += v * (double)((sc >= 1.0) & (sc < bn) & (denom > 0.0) & (sg * sy >= 0.0));
         }
     }
     double best = 0.0;
@@ -220,7 +223,7 @@ static double mbls_multi_eval(const double *restrict cy, const double *restrict 
 static double mbls_sweep_multi(const double *cy, const double *cr, const double *cc,
                                const double *ct, int n_bands, int nb, const int *widths,
                                int nw, double mp, const double *band_w,
-                               const double *band_n, int *idx, double *acc)
+                               const double *band_n, int *idx, double *acc, double sg)
 {
     double best = 0.0;
     for (int wi = 0; wi < nw; wi++) {
@@ -232,7 +235,7 @@ static double mbls_sweep_multi(const double *cy, const double *cr, const double 
             const int m = mbls_multi_gate(ct, i0, i1, off, part ? ct[nb] : 0.0, mp, idx);
             if (m == 0) continue;
             const double v = mbls_multi_eval(cy, cr, cc, n_bands, nb, idx, m, off, part,
-                                             band_w, band_n, acc);
+                                             band_w, band_n, acc, sg);
             best = v > best ? v : best;
         }
     }

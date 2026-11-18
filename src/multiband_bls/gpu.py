@@ -33,12 +33,18 @@ import numpy.typing as npt
 from .api import (
     _check_coarse,
     _check_dlogq,
+    _check_sign,
+    _coarse_active,
     _coarse_to_fine,
+    _flux_scale,
     _grid_params,
     _log_widths,
     _merge_bands,
     _preprocess_single,
+    _refine_at,
     _result,
+    _scale_bands,
+    _shift_bands,
     eebls,
     multiband_eebls,
 )
@@ -63,9 +69,10 @@ _THREADS = 256  # threads per block. Hard-coded into the kernels: the exact
 # changing _MAX_BANDS (update every fixed [8] per-band array declaration in the
 # kernel sources: bw, s/r/cnt in the exact kernel; bw in the fast kernel).
 _MAX_BANDS: int = 8
-# The fast kernels count in-transit points in float32 bins; integer sums are
-# exact only below 2**24, so larger light curves are rejected.
-_MAX_FAST_POINTS: int = 2**24
+# The fast kernels count in-transit points in float32 bins and gate them against
+# ``count - 0.5f``; both are exact only below 2**23 (float32 spacing <= 0.5), so
+# larger light curves are rejected.
+_MAX_FAST_POINTS: int = 2**23
 # The kernels take point and frequency counts as C int; larger inputs would wrap.
 _MAX_INT32: int = int(np.iinfo(np.int32).max)
 # The fast kernels hold median-centred times and frequencies in float32; keep
@@ -115,7 +122,7 @@ extern "C" __global__ __launch_bounds__(256)
 void eebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                   const double* __restrict__ w, int n, int nf,
                   const double* __restrict__ freqs, int nb, int kmi, int kma,
-                  int min_bin_points, double* power) {
+                  int min_bin_points, double* power, double sg) {
     extern __shared__ double sh[];           // ybin[nb], rbin[nb], cbin[nb]
     double* ybin = sh;
     double* rbin = sh + nb;
@@ -147,6 +154,7 @@ void eebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                 if (ww < kmi) continue;
                 if (cnt < min_bin_points) continue;
                 if (cnt >= n) continue;  // no out-of-transit point: depth not identifiable
+                if (sg * s < 0.0) continue;  // sign cut (sg = 0: both signs)
                 double denom = r * (1.0 - r);
                 if (denom <= 0.0) continue;
                 double sr2 = s * s / denom;
@@ -175,7 +183,7 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                    const int* __restrict__ band_n,
                    int n, int n_bands, int nf,
                    const double* __restrict__ freqs, int nb, int kmi, int kma,
-                   int min_points, double* power, int* kout) {
+                   int min_points, double* power, int* kout, double sg) {
     extern __shared__ double sh[];           // ybin/rbin/cbin each n_bands*nb
     double* ybin = sh;
     double* rbin = sh + n_bands * nb;
@@ -223,7 +231,7 @@ void meebls_kernel(const double* __restrict__ t, const double* __restrict__ wx,
                     // identifiable only with points both in and out of the window
                     if (cnt[b] < 1 || cnt[b] >= bn[b]) continue;
                     double denom = r[b] * (1.0 - r[b]);
-                    if (denom <= 0.0) continue;
+                    if (denom <= 0.0 || sg * s[b] < 0.0) continue;  // per-band sign cut
                     T3 += bw[b] * s[b] * s[b] / denom; kk++;
                 }
                 if (T3 > best) { best = T3; best_k = kk; }
@@ -292,7 +300,7 @@ void eebls_fast_kernel(
     int n, int nf,
     const double* __restrict__ freqs, int nb,
     const int* __restrict__ widths, int n_widths,
-    int min_points, double* power)
+    int min_points, double* power, float sg)
 {
     extern __shared__ float sh[];
     float* ybin     = sh;
@@ -366,6 +374,7 @@ void eebls_fast_kernel(
                     sy = (toty - cy0) + ybin[j2];
                     sr = (totr - cr0) + rbin[j2];
                 }
+                if (sg * sy < 0.f) continue;  // sign cut (sg = 0: both signs)
                 float denom = sr * (1.f - sr);
                 if (denom <= 0.f) continue;
                 float sr2 = sy * sy / denom;
@@ -408,7 +417,7 @@ _FAST_BOX_MULTI_SRC = _FAST_HELPERS + r"""
 // best_k with WITH_K). sh holds ybin/rbin/cbin (inclusive cumsums) per band.
 __device__ __forceinline__ void eval_window(
     const float* __restrict__ sh, const int* __restrict__ widths, const float* bw,
-    int i1, int wi, int nb, int tot, int n_bands, float min_cnt,
+    int i1, int wi, int nb, int tot, int n_bands, float min_cnt, float sg,
     float& best2
 #ifdef WITH_K
     , int& best_k
@@ -446,7 +455,7 @@ __device__ __forceinline__ void eval_window(
         // (cc[nb - 1] is the band's total point count)
         if (sc < 0.5f || sc > cc[nb - 1] - 0.5f) continue;
         const float denom = sr * (1.f - sr);
-        if (denom <= 0.f) continue;
+        if (denom <= 0.f || sg * sy < 0.f) continue;  // per-band sign cut
         sr2 += bw[b] * sy * sy / denom; kk++;
     }
     if (cnt_tot < min_cnt) return;
@@ -463,10 +472,10 @@ __device__ __forceinline__ void eval_window(
 #define FLAT_NB 224
 #ifdef WITH_K
 #define EVAL(i1_, wi_) eval_window(sh, widths, bw, i1_, wi_, nb, tot, n_bands, \
-                                   min_cnt, best2, best_k)
+                                   min_cnt, sg, best2, best_k)
 #else
 #define EVAL(i1_, wi_) eval_window(sh, widths, bw, i1_, wi_, nb, tot, n_bands, \
-                                   min_cnt, best2)
+                                   min_cnt, sg, best2)
 #endif
 extern "C" __global__ __launch_bounds__(256, 4)
 void meebls_fast_kernel(
@@ -479,7 +488,7 @@ void meebls_fast_kernel(
     int n, int n_bands, int nf,
     const double* __restrict__ freqs, int nb,
     const int* __restrict__ widths, int n_widths,
-    int min_points, double* power, int* kout)
+    int min_points, double* power, int* kout, float sg)
 {
     extern __shared__ float sh[];             // ybin[b][nb], rbin[b][nb], cbin[b][nb]
     float* warp_max = sh + 3 * n_bands * nb;  // 8 floats (one per warp)
@@ -662,6 +671,7 @@ def eebls_gpu(
     q_min: float = 0.01,
     q_max: float = 0.10,
     min_points: int = 3,
+    sign: str = "both",
 ) -> BLSResult:
     """GPU binned BLS (single band). Mirrors :func:`multiband_bls.eebls`.
 
@@ -684,9 +694,15 @@ def eebls_gpu(
         Maximum transit duration as a fraction of the period.
     min_points :
         Minimum number of in-transit points required.
+    sign :
+        ``"both"`` (default), ``"positive"`` or ``"negative"``: keep only windows whose
+        weighted mean of ``y`` is above / below the out-of-window baseline (per band in
+        the multiband searches). See :func:`multiband_bls.eebls`.
+
     """
     import cupy as cp
 
+    sg = _check_sign(sign, "eebls_gpu")
     freqs_np, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -718,13 +734,13 @@ def eebls_gpu(
     _single_kernel((n_blocks,), (_THREADS,),
                    (t_d, wx_d, w_d, np.int32(t_d.size), np.int32(nf), f_d,
                     np.int32(nbins), np.int32(kmi), np.int32(kma),
-                    np.int32(min(min_points, t_d.size + 1)), power_d),
+                    np.int32(min(min_points, t_d.size + 1)), power_d, np.float64(sg)),
                    shared_mem=shared)
     power_np = cp.asnumpy(power_d)
     return _result(power_np, yy, freqs_np,
                    lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
                                     q_min=q_min, q_max=q_max,
-                                    min_points=min_points))
+                                    min_points=min_points, sign=sign))
 
 
 def multiband_eebls_gpu(
@@ -735,6 +751,7 @@ def multiband_eebls_gpu(
     q_max: float = 0.10,
     min_points: int = 3,
     rescale_errors: bool = False,
+    sign: str = "both",
 ) -> BLSResult:
     """GPU binned multiband BLS. Mirrors :func:`multiband_bls.multiband_eebls`.
 
@@ -756,6 +773,10 @@ def multiband_eebls_gpu(
         Minimum number of in-transit points required across all bands.
     rescale_errors :
         As in :func:`multiband_bls.multiband_sparse_bls`.
+    sign :
+        ``"both"`` (default), ``"positive"`` or ``"negative"``: keep only windows whose
+        weighted mean of ``y`` is above / below the out-of-window baseline (per band in
+        the multiband searches). See :func:`multiband_bls.eebls`.
 
     Notes
     -----
@@ -765,6 +786,7 @@ def multiband_eebls_gpu(
     """
     import cupy as cp
 
+    sg = _check_sign(sign, "multiband_eebls_gpu")
     freqs_np, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -803,7 +825,7 @@ def multiband_eebls_gpu(
     _multi_kernel((n_blocks,), (_THREADS,),
                   (t_d, wx_d, w_d, band_d, bw_d, bn_d, np.int32(t_d.size), np.int32(n_bands),
                    np.int32(nf), f_d, np.int32(nbins), np.int32(kmi), np.int32(kma),
-                   np.int32(min(min_points, t_d.size + 1)), power_d, k_d),
+                   np.int32(min(min_points, t_d.size + 1)), power_d, k_d, np.float64(sg)),
                   shared_mem=shared)
     power = cp.asnumpy(power_d)
     n_bands_used = cp.asnumpy(k_d).astype(np.int64)
@@ -812,7 +834,7 @@ def multiband_eebls_gpu(
     return _result(power, chi2_flat, freqs_np,
                    lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
                                               q_min=q_min, q_max=q_max,
-                                              min_points=min_points),
+                                              min_points=min_points, sign=sign),
                    bands=labels, band_chi2_red=chi2_red, n_bands_used=n_bands_used)
 
 
@@ -828,6 +850,7 @@ def eebls_gpu_fast(
     dlogq: float = 0.3,
     coarse_factor: int = 1,
     n_refine: int = 20,
+    sign: str = "both",
 ) -> BLSResult:
     """Fast GPU binned BLS using prefix-sum bins and log-spaced transit widths.
 
@@ -869,6 +892,10 @@ def eebls_gpu_fast(
         around the ``n_refine`` highest separated coarse peaks; see
         :func:`multiband_bls.eebls_fast`. Can miss narrow or weak peaks, so validate
         recovery against the full grid first.
+    sign :
+        ``"both"`` (default), ``"positive"`` or ``"negative"``: keep only windows whose
+        weighted mean of ``y`` is above / below the out-of-window baseline (per band in
+        the multiband searches). See :func:`multiband_bls.eebls`.
 
     Notes
     -----
@@ -884,10 +911,11 @@ def eebls_gpu_fast(
     recomputed exactly on the CPU at the best frequency, while ``power`` and
     ``best_power`` stay the fast kernel's values; the two need not describe
     exactly the same box.
-    Light curves with ``n >= 2**24`` points are rejected (float32 counts).
+    Light curves with ``n >= 2**23`` points are rejected (float32 counts).
     """
     import cupy as cp
 
+    sg = _check_sign(sign, "eebls_gpu_fast")
     freqs_np, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -905,7 +933,11 @@ def eebls_gpu_fast(
     dlogq = _check_dlogq(dlogq, "eebls_gpu_fast")
     coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine, "eebls_gpu_fast")
     _kernels()  # ensure compiled
-    wx, w_hat, yy = _preprocess_single(y, dy)
+    # Work in units of the median uncertainty so sy**2 and the band weights stay
+    # inside float32 range for any flux scale; the power is scale-invariant.
+    f_scale = _flux_scale([dy])
+    wx, w_hat, yy = _preprocess_single(np.asarray(y, dtype=np.float64) / f_scale,
+                                       np.asarray(dy, dtype=np.float64) / f_scale)
 
     # Subtract the median so large JD values (t ~ 2.4e6) keep full precision
     # in the two-float split (and the float32 bin accumulators).
@@ -941,16 +973,18 @@ def eebls_gpu_fast(
         _fast_single_kernel(
             (min(nf, 2048),), (_THREADS,),
             (thi_d, tlo_d, wx_d, w_d, np.int32(n), np.int32(nf), f_d, np.int32(nbins),
-             widths_d, np.int32(n_widths), np.int32(min(min_points, n + 1)), power_d),
+             widths_d, np.int32(n_widths), np.int32(min(min_points, n + 1)), power_d,
+             np.float32(sg)),
             shared_mem=shared,
         )
         return cp.asnumpy(power_d)
 
     power_np = _coarse_to_fine(evaluate, freqs_np, coarse_factor, n_refine)
+    t_c = np.asarray(t, dtype=np.float64) - t_offset
     return _result(power_np, yy, freqs_np,
-                   lambda bf: eebls(t, y, dy, np.array([bf]), nbins=nbins,
-                                    q_min=q_min, q_max=q_max,
-                                    min_points=min_points))
+                   _refine_at(lambda bf: eebls(t_c, y, dy, np.array([bf]), nbins=nbins,
+                                               q_min=q_min, q_max=q_max,
+                                               min_points=min_points, sign=sign), t_offset))
 
 
 def multiband_eebls_gpu_fast(
@@ -965,6 +999,7 @@ def multiband_eebls_gpu_fast(
     compute_n_bands_used: bool = True,
     coarse_factor: int = 1,
     n_refine: int = 20,
+    sign: str = "both",
 ) -> BLSResult:
     """Fast GPU binned multiband BLS using prefix-sum bins and log-spaced widths.
 
@@ -1001,7 +1036,12 @@ def multiband_eebls_gpu_fast(
     coarse_factor, n_refine :
         Opt-in coarse-to-fine search, as in :func:`eebls_gpu_fast`. With
         ``coarse_factor > 1`` :attr:`BLSResult.n_bands_used` is ``None`` (it is not
-        defined at the interpolated frequencies).
+        defined at the interpolated frequencies), unless the grid is too short
+        (``< 4 * coarse_factor`` frequencies) for any frequency to be skipped.
+    sign :
+        ``"both"`` (default), ``"positive"`` or ``"negative"``: keep only windows whose
+        weighted mean of ``y`` is above / below the out-of-window baseline (per band in
+        the multiband searches). See :func:`multiband_bls.eebls`.
 
     Notes
     -----
@@ -1015,7 +1055,7 @@ def multiband_eebls_gpu_fast(
     less accurate than the exact kernels'. The best period's parameters are
     recomputed exactly on the CPU, while ``power``/``best_power`` stay the fast
     kernel's values (the two need not describe exactly the same box). Light
-    curves with ``n >= 2**24`` points in total are rejected (float32 counts).
+    curves with ``n >= 2**23`` points in total are rejected (float32 counts).
 
     ``n_bands_used`` counts the bands of the window this kernel
     selects. It matches :func:`multiband_bls.multiband_eebls` when both search
@@ -1025,6 +1065,7 @@ def multiband_eebls_gpu_fast(
     """
     import cupy as cp
 
+    sg = _check_sign(sign, "multiband_eebls_gpu_fast")
     freqs_np, min_points, nbins = _validate_search_params(
         frequencies, q_max, min_points, q_min=q_min, nbins=nbins
     )
@@ -1035,10 +1076,17 @@ def multiband_eebls_gpu_fast(
     dlogq = _check_dlogq(dlogq, "multiband_eebls_gpu_fast")
     coarse_factor, n_refine = _check_coarse(coarse_factor, n_refine,
                                             "multiband_eebls_gpu_fast")
-    compute_n_bands_used = compute_n_bands_used and coarse_factor == 1
+    # n_bands_used is undefined at interpolated frequencies; it is still available when
+    # the grid is too short for the coarse search to skip any frequency.
+    compute_n_bands_used = compute_n_bands_used and not _coarse_active(
+        freqs_np.size, coarse_factor)
     _kernels()  # ensure compiled
     kernel = _fast_multi_kernel_k if compute_n_bands_used else _fast_multi_kernel
-    t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(bands)
+    # Median-uncertainty units keep sy**2 and the band weights inside float32 range
+    # for any flux scale (the power is scale-invariant); refinement uses `bands`.
+    f_scale = _flux_scale([b[2] for b in bands.values()])
+    t_all, wx_all, w_all, band_all, labels, w_totals, chi2_flat = _merge_bands(
+        _scale_bands(bands, f_scale))
     _check_phase_range(t_all, freqs_np)
     _check_int32_sizes(t_all.shape[0], freqs_np.size, "multiband_eebls_gpu_fast")
     n_bands = len(labels)
@@ -1092,7 +1140,7 @@ def multiband_eebls_gpu_fast(
             (min(nf, 2048),), (_THREADS,),
             (thi_d, tlo_d, wx_d, w_d, band_d, bw_d, np.int32(n), np.int32(n_bands),
              np.int32(nf), f_d, np.int32(nbins), widths_d, np.int32(n_widths),
-             np.int32(min(min_points, n + 1)), power_d, k_d),
+             np.int32(min(min_points, n + 1)), power_d, k_d, np.float32(sg)),
             shared_mem=shared,
         )
         if compute_n_bands_used:
@@ -1100,14 +1148,16 @@ def multiband_eebls_gpu_fast(
         return cp.asnumpy(power_d)
 
     power = _coarse_to_fine(evaluate, freqs_np, coarse_factor, n_refine)
-    # (coarse_factor == 1 evaluates the whole grid in one call)
+    # (a full evaluation, i.e. no coarse search, is one call over the whole grid)
     n_bands_used = k_out[0].astype(np.int64) if compute_n_bands_used else None
     # Refine on the already-prepared (possibly rescaled) bands so power and the
     # refined parameters share one objective.
+    bands_c = _shift_bands(bands, t_offset)
     return _result(power, chi2_flat, freqs_np,
-                   lambda bf: multiband_eebls(bands, np.array([bf]), nbins=nbins,
-                                              q_min=q_min, q_max=q_max,
-                                              min_points=min_points),
+                   _refine_at(lambda bf: multiband_eebls(bands_c, np.array([bf]),
+                                                         nbins=nbins, q_min=q_min,
+                                                         q_max=q_max, min_points=min_points,
+                                                         sign=sign), t_offset),
                    bands=labels, band_chi2_red=chi2_red, n_bands_used=n_bands_used)
 
 

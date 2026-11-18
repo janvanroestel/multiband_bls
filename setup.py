@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 from Cython.Build import cythonize
 from setuptools import Extension, setup
 
-COMPILE_ARGS = ["-O3", "-ffast-math"]
+# -fno-finite-math-only keeps NaN handling defined (the multiband cores store NaN
+# for unmeasured bands) while the rest of -ffast-math still applies. MSVC has no
+# such flags: plain /O2 there.
+COMPILE_ARGS = ["/O2"] if sys.platform == "win32" else [
+    "-O3", "-ffast-math", "-fno-finite-math-only"]
 
 extensions = [
     Extension(

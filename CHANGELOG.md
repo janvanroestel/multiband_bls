@@ -18,7 +18,48 @@
   weak or narrow peaks, so validate recovery against the full grid first. In 60 random
   injections (4 bands x 60 points) `coarse_factor` 2-4 recovered all 26 signals the
   full grid recovered, at 2.0-3.8x the speed. `n_bands_used` is `None` for
-  `multiband_eebls_gpu_fast` with `coarse_factor > 1`.
+  `multiband_eebls_gpu_fast` when the coarse search skips frequencies (grids shorter
+  than `4 * coarse_factor` are evaluated in full and keep it).
+- `sparse_bls` and `multiband_sparse_bls` (and their reference versions) take `q_min`
+  (default 0.01) and `sign`, matching the binned entry points. The binned reference
+  searches (`eebls_reference`, `multiband_eebls_reference`) also take `sign`, so the
+  pure-Python fallback accepts every documented argument.
+
+### Changed
+
+- Sparse searches now exclude windows shorter than `q_min` (default 0.01 of the
+  period); previously there was no minimum duration. Pass a smaller `q_min` for the
+  old behaviour.
+- Binned searches enforce `q_min <= duration <= q_max` exactly: the window widths are
+  now `ceil(q_min * nbins)` to `floor(q_max * nbins)` (previously `floor(q_min * nbins)`
+  to `floor(q_max * nbins) + 1`, which could exceed `q_max`). A `ValueError` is raised
+  if no integer width fits. Results can differ slightly from earlier versions.
+- `multiband_sparse_bls` updates the combined statistic incrementally (O(1) per window
+  extension instead of O(bands)): about 1.6x faster with 6 bands, 2.7x with 12.
+
+### Fixed
+
+- Coarse-to-fine search no longer recurses forever when the frequency grid contains
+  duplicates.
+- Fast entry points (`eebls_fast`, `multiband_eebls_fast`, `eebls_gpu_fast`,
+  `multiband_eebls_gpu_fast`): `best_t0`, `best_duration` and `best_depth` are now
+  refined on the same median-centred times the search folded, so the refined window
+  passes the same `min_points` gate as the scored one (`best_t0` is still reported
+  on the original time axis).
+- GPU fast kernels now work in units of the median uncertainty: flux scales such as
+  1e-20 (CGS) or 1e25 previously underflowed or overflowed the float32 kernels and
+  returned power 0 or inf. The power is scale-invariant, so results are unchanged
+  otherwise.
+- GPU fast kernels reject light curves with `n >= 2**23` points (was `2**24`): above
+  that the float32 `count - 0.5` gates round to the count itself.
+- Coarse-to-fine search on a descending or unsorted frequency grid.
+- Build flags: `-fno-finite-math-only` is added to `-O3 -ffast-math` so the NaN that the
+  multiband cores store for unmeasured bands is well defined; MSVC builds use `/O2`.
+- `multiband_eebls_fast` converts the band index and counts the points per band once
+  instead of in every thread chunk.
+- `build_frequency_grid` and the `q_*` fraction checks reject `bool` and string
+  arguments; `auto_nbins` validates `n_res` and no longer raises `OverflowError` for a
+  tiny `q_min`.
 
 ### Changed
 
@@ -41,6 +82,11 @@
   best-period refinement (`_result`) moved from `gpu.py` to `api.py`, where both the
   GPU and the new CPU fast entry points use them. `gpu.py` re-imports them, so
   `multiband_bls.gpu._log_widths` etc. still work.
+
+### Removed
+
+- The unused trapezoid-shape code path in `_eebls.pyx` (`f_arr`/`tau`); `eebls_grid`
+  no longer takes `f_arr` or returns `best_tau`. Not part of the public API.
 
 ## [0.1.0] — 2026-10-17
 
