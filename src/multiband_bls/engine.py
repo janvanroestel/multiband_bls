@@ -147,7 +147,7 @@ def execute(
     impl.check_frequencies(prep, freqs, opts)
     nf = freqs.shape[0]
     single = len(segments) == 1 and isinstance(segments[0][0], slice)
-    power = np.empty(nf, dtype=np.float64)
+    power: Array = np.empty(nf, dtype=np.float64)
     n_used: npt.NDArray[np.int64] | None = None
     have_counts = True
     outs: list[RunOutput] = []

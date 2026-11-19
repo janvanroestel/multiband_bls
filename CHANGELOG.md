@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-11-19
+
+### Fixed
+
+- CI/wheel builds: golden tests compare floats to `rtol=1e-12` instead of bit-exactly (last-bit differences across compilers/NumPy builds); mypy annotation in `engine.py`. No change to results.
+
 ## [0.3.0] — 2026-11-19
 
 ### Changed

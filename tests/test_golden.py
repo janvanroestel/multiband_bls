@@ -24,7 +24,12 @@ def test_cpu_matches_golden(name):
     got, want = flatten(_CPU[name]()), _expected(name)
     assert set(got) == set(want)
     for key, w in want.items():
-        np.testing.assert_array_equal(got[key], w, err_msg=f"{name}/{key}")
+        if np.issubdtype(np.asarray(w).dtype, np.floating):
+            # last-bit differences between compilers/NumPy builds are not regressions
+            np.testing.assert_allclose(got[key], w, rtol=1e-12, atol=1e-15,
+                                       err_msg=f"{name}/{key}")
+        else:
+            np.testing.assert_array_equal(got[key], w, err_msg=f"{name}/{key}")
 
 
 @pytest.mark.gpu
