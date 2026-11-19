@@ -29,7 +29,9 @@
 #define restrict __restrict
 #endif
 
-#if defined(__GNUC__) && defined(__x86_64__) && defined(__linux__) && !defined(MBLS_NO_CLONES)
+/* target_clones needs ifunc, i.e. glibc: musl (musllinux wheels) gets the baseline build */
+#if defined(__GNUC__) && defined(__x86_64__) && defined(__linux__) && defined(__GLIBC__) \
+    && !defined(MBLS_NO_CLONES)
 #define MBLS_CLONES __attribute__((noinline, target_clones("arch=haswell", "default")))
 #else
 #define MBLS_CLONES

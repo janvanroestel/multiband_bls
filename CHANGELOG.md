@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-11-19
+
+### Fixed
+
+- musllinux wheels: the AVX2 multiversioning of the fast CPU kernels (`target_clones`, which needs glibc's ifunc) is now limited to glibc; musl builds use the baseline code.
+
 ## [0.3.1] — 2026-11-19
 
 ### Fixed
